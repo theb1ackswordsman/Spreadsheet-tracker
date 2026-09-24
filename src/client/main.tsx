@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { App } from './App';
+import './bridge'; // module-level singleton: creates worker
 import './styles/tokens.css';
 
 const rootEl = document.getElementById('root');
