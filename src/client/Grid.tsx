@@ -1,9 +1,11 @@
-import React, { useCallback, useRef, useState, useEffect } from 'react';
+import React, { useCallback, useRef, useState, useEffect, useImperativeHandle } from 'react';
 import { COLS, ROWS } from '../engine/constants';
 import { Cell, getDevRenderCount, resetDevRenderCount } from './Cell';
+import { Editor } from './Editor';
 import { reduce, initNav, toCellId, colLabel } from './nav';
 import type { NavState, NavAction } from './nav';
-import { subscribeMeta } from './store';
+import { subscribeMeta, getRaw } from './store';
+import { commitEdits } from './commit';
 
 // ── Constants ──
 
@@ -27,15 +29,45 @@ if (import.meta.env.DEV) {
   w['__gridDevRenderReset'] = resetDevRenderCount;
 }
 
+// ── Helpers ──
+
+function isPrintable(key: string): boolean {
+  return key.length === 1 && !key.match(/[\x00-\x1f]/);
+}
+
 // ── Grid component ──
 
-export function Grid() {
+export interface GridHandle {
+  refocus: () => void;
+}
+
+export interface GridProps {
+  onNavChange?: (nav: NavState, editBuffer: string) => void;
+}
+
+export const Grid = React.forwardRef<GridHandle, GridProps>(function Grid(
+  { onNavChange },
+  ref
+) {
   const [nav, setNav] = useState<NavState>(initNav);
+  const [editBuffer, setEditBuffer] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollTopRef = useRef(0);
   const rafRef = useRef(0);
   const [visibleStart, setVisibleStart] = useState(0);
   const [visibleEnd, setVisibleEnd] = useState(30);
+  // Track the raw value at edit start for cancel/restore
+  const editStartRawRef = useRef('');
+
+  // Notify parent of nav/edit changes
+  const navRef = useRef(nav);
+  const editBufferRef = useRef(editBuffer);
+  navRef.current = nav;
+  editBufferRef.current = editBuffer;
+
+  useEffect(() => {
+    onNavChange?.(nav, editBuffer);
+  }, [nav, editBuffer, onNavChange]);
 
   // Compute visible rows from scroll position
   const updateVisibleRows = useCallback(() => {
@@ -71,23 +103,97 @@ export function Grid() {
     };
   }, [updateVisibleRows]);
 
-  // Dispatch nav action
-  const dispatch = useCallback((action: NavAction) => {
-    setNav(prev => reduce(prev, action));
+  // Refocus grid container
+  const refocusGrid = useCallback(() => {
+    containerRef.current?.focus();
   }, []);
+
+  useImperativeHandle(ref, () => ({
+    refocus: refocusGrid,
+  }), [refocusGrid]);
+
+  // Start editing with a given initial value
+  const startEdit = useCallback((initialValue: string) => {
+    const cellId = toCellId(navRef.current.col, navRef.current.row);
+    editStartRawRef.current = getRaw(cellId);
+    setEditBuffer(initialValue);
+    setNav(prev => reduce(prev, { t: 'EDIT_START' }));
+  }, []);
+
+  // Commit the current edit buffer
+  const doCommit = useCallback((value: string) => {
+    const n = navRef.current;
+    if (n.mode !== 'edit') return;
+    const cellId = toCellId(n.col, n.row);
+    commitEdits([{ cell: cellId, raw: value }]);
+    setNav(prev => reduce(prev, { t: 'COMMIT' }));
+    refocusGrid();
+  }, [refocusGrid]);
+
+  // Commit and move (Enter/Tab from editor)
+  const doCommitAndMove = useCallback((value: string, direction: 'down' | 'up' | 'right' | 'left') => {
+    const n = navRef.current;
+    const cellId = toCellId(n.col, n.row);
+    commitEdits([{ cell: cellId, raw: value }]);
+    if (direction === 'down' || direction === 'up') {
+      setNav(prev => reduce(prev, { t: 'ENTER', shift: direction === 'up' }));
+    } else {
+      setNav(prev => reduce(prev, { t: 'TAB', shift: direction === 'left' }));
+    }
+    refocusGrid();
+  }, [refocusGrid]);
+
+  // Cancel editing, restore original value
+  const doCancel = useCallback(() => {
+    setNav(prev => reduce(prev, { t: 'CANCEL' }));
+    refocusGrid();
+  }, [refocusGrid]);
+
+  // Handle buffer changes from formula bar
+  const handleBufferChange = useCallback((value: string) => {
+    setEditBuffer(value);
+  }, []);
+
+  // Handle formula bar starting edit
+  const handleFormulaBarStartEdit = useCallback((value: string) => {
+    startEdit(value);
+  }, [startEdit]);
 
   // Click handler for cells
   const handleCellClick = useCallback((col: number, row: number) => {
-    dispatch({ t: 'CLICK', col, row });
-  }, [dispatch]);
+    // If editing a different cell, commit first
+    setNav(prev => {
+      if (prev.mode === 'edit') {
+        const cellId = toCellId(prev.col, prev.row);
+        commitEdits([{ cell: cellId, raw: editBufferRef.current }]);
+      }
+      return reduce(prev, { t: 'CLICK', col, row });
+    });
+  }, []);
+
+  // Double-click handler for cells
+  const handleCellDoubleClick = useCallback((col: number, row: number) => {
+    const prev = navRef.current;
+    if (prev.mode === 'edit') {
+      const prevCellId = toCellId(prev.col, prev.row);
+      commitEdits([{ cell: prevCellId, raw: editBufferRef.current }]);
+    }
+    const cellId = toCellId(col, row);
+    const raw = getRaw(cellId);
+    editStartRawRef.current = raw;
+    setEditBuffer(raw);
+    setNav({ col, row, mode: 'edit' });
+  }, []);
 
   // Keyboard handler on the grid container
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    // Only handle keys in navigate mode
-    // We read the latest nav via the functional setState trick
     setNav(prev => {
-      if (prev.mode !== 'navigate') return prev;
+      if (prev.mode === 'edit') {
+        // In edit mode, the Editor/FormulaBar handles its own keys
+        return prev;
+      }
 
+      // Navigate mode
       let action: NavAction | null = null;
 
       switch (e.key) {
@@ -95,13 +201,52 @@ export function Grid() {
         case 'ArrowDown':  action = { t: 'ARROW', dc: 0, dr: 1 }; break;
         case 'ArrowLeft':  action = { t: 'ARROW', dc: -1, dr: 0 }; break;
         case 'ArrowRight': action = { t: 'ARROW', dc: 1, dr: 0 }; break;
-        case 'Tab':        action = { t: 'TAB', shift: e.shiftKey }; break;
-        case 'Enter':      action = { t: 'ENTER', shift: e.shiftKey }; break;
-        default: return prev;
+        case 'Tab':
+          e.preventDefault();
+          return reduce(prev, { t: 'TAB', shift: e.shiftKey });
+        case 'Enter':
+          if (e.shiftKey) {
+            e.preventDefault();
+            return reduce(prev, { t: 'ENTER', shift: true });
+          }
+          // Enter without shift does NOT move in navigate mode; starts editing would be another option
+          // but per P2b, Enter moves. Actually, re-reading: the existing nav behavior has Enter moving.
+          // But now with editing, we should keep Enter moving in navigate mode.
+          e.preventDefault();
+          return reduce(prev, { t: 'ENTER', shift: false });
+        case 'F2': {
+          e.preventDefault();
+          const cellId = toCellId(prev.col, prev.row);
+          const raw = getRaw(cellId);
+          editStartRawRef.current = raw;
+          setEditBuffer(raw);
+          return reduce(prev, { t: 'EDIT_START' });
+        }
+        case 'Delete':
+        case 'Backspace': {
+          e.preventDefault();
+          const cellId = toCellId(prev.col, prev.row);
+          commitEdits([{ cell: cellId, raw: '' }]);
+          return prev;
+        }
+        default: {
+          // Printable character: start editing with that character
+          if (isPrintable(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            e.preventDefault();
+            const cellId = toCellId(prev.col, prev.row);
+            editStartRawRef.current = getRaw(cellId);
+            setEditBuffer(e.key);
+            return reduce(prev, { t: 'EDIT_START' });
+          }
+          return prev;
+        }
       }
 
-      e.preventDefault();
-      return reduce(prev, action);
+      if (action) {
+        e.preventDefault();
+        return reduce(prev, action);
+      }
+      return prev;
     });
   }, []);
 
@@ -142,16 +287,34 @@ export function Grid() {
     for (let c = 0; c < COLS; c++) {
       const id = toCellId(c, r);
       const isActive = c === nav.col && r === nav.row;
-      cells.push(
-        <Cell
-          key={id}
-          id={id}
-          col={c}
-          row={r}
-          active={isActive}
-          onClick={handleCellClick}
-        />
-      );
+      const isEditing = isActive && nav.mode === 'edit';
+
+      if (isEditing) {
+        cells.push(
+          <Editor
+            key={`editor-${id}`}
+            col={c}
+            row={r}
+            initialValue={editBuffer}
+            onChange={setEditBuffer}
+            onCommit={doCommit}
+            onCancel={doCancel}
+            onCommitAndMove={doCommitAndMove}
+          />
+        );
+      } else {
+        cells.push(
+          <Cell
+            key={id}
+            id={id}
+            col={c}
+            row={r}
+            active={isActive}
+            onClick={handleCellClick}
+            onDoubleClick={handleCellDoubleClick}
+          />
+        );
+      }
     }
 
     // Row header
@@ -236,7 +399,7 @@ export function Grid() {
       style={{
         position: 'relative',
         width: '100%',
-        height: 'calc(100vh - 8px)',
+        flex: 1,
         overflow: 'auto',
         outline: 'none',
         fontFamily: 'var(--font-ui)',
@@ -286,4 +449,7 @@ export function Grid() {
       </div>
     </div>
   );
-}
+});
+
+// Export for App.tsx to wire FormulaBar
+export type { NavState };

@@ -32,23 +32,4 @@ export function apply(edits: Edit[], mode: Mode = 'inc'): void {
   worker.postMessage({ t: 'APPLY', edits, mode });
 }
 
-// ── Dev-only console verification ──
 
-if (import.meta.env.DEV) {
-  setTimeout(() => {
-    console.log('[bridge/dev] applying test edits...');
-    apply([{ cell: 'A1', raw: '10' }]);
-    apply([{ cell: 'A2', raw: '20' }]);
-    apply([{ cell: 'A3', raw: '=A1+A2' }]);
-
-    // Log after two frames so the PATCH has been applied
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        console.log('[bridge/dev] A1 =', getCell('A1'));
-        console.log('[bridge/dev] A2 =', getCell('A2'));
-        console.log('[bridge/dev] A3 =', getCell('A3'));
-        console.log('[bridge/dev] meta =', getMeta());
-      });
-    });
-  }, 500);
-}

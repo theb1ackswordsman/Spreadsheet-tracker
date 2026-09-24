@@ -16,9 +16,10 @@ interface CellProps {
   row: number;
   active: boolean;
   onClick: (col: number, row: number) => void;
+  onDoubleClick: (col: number, row: number) => void;
 }
 
-export const Cell = React.memo(function Cell({ id, col, row, active, onClick }: CellProps) {
+export const Cell = React.memo(function Cell({ id, col, row, active, onClick, onDoubleClick }: CellProps) {
   if (import.meta.env.DEV) {
     bumpRenderCount();
   }
@@ -27,6 +28,10 @@ export const Cell = React.memo(function Cell({ id, col, row, active, onClick }: 
 
   const handleClick = () => {
     onClick(col, row);
+  };
+
+  const handleDoubleClick = () => {
+    onDoubleClick(col, row);
   };
 
   let content: string;
@@ -80,6 +85,7 @@ export const Cell = React.memo(function Cell({ id, col, row, active, onClick }: 
       aria-colindex={col + 2}
       style={style}
       onClick={handleClick}
+      onDoubleClick={handleDoubleClick}
     >
       {content}
     </div>

@@ -98,10 +98,16 @@ export function applyPatch(cells: PatchCell[], stats: Stats): void {
 }
 
 export function setRawMirror(id: CellId, raw: string): void {
+  const prev = rawMirror.get(id) ?? '';
+  if (prev === raw) return;
   if (raw === '') {
     rawMirror.delete(id);
   } else {
     rawMirror.set(id, raw);
+  }
+  const cellSubs = subs.get(id);
+  if (cellSubs) {
+    for (const cb of cellSubs) cb();
   }
 }
 
@@ -137,11 +143,18 @@ export function subscribeMeta(cb: () => void): () => void {
   return () => { metaSubs.delete(cb); };
 }
 
-// ── React hook ──
+// ── React hooks ──
 
 export function useCell(id: CellId): Result {
   return useSyncExternalStore(
     (cb) => subscribeCell(id, cb),
     () => getCell(id),
+  );
+}
+
+export function useRaw(id: CellId): string {
+  return useSyncExternalStore(
+    (cb) => subscribeCell(id, cb),
+    () => getRaw(id),
   );
 }

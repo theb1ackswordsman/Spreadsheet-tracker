@@ -16,7 +16,11 @@ export type NavAction =
   | { t: 'TAB'; shift: boolean }
   | { t: 'ENTER'; shift: boolean }
   | { t: 'CLICK'; col: number; row: number }
-  | { t: 'SET_MODE'; mode: NavMode };
+  | { t: 'SET_MODE'; mode: NavMode }
+  | { t: 'EDIT_START' }
+  | { t: 'COMMIT' }
+  | { t: 'CANCEL' }
+  | { t: 'DELETE' };
 
 // ── Helpers ──
 
@@ -59,7 +63,7 @@ export function reduce(state: NavState, action: NavAction): NavState {
     }
 
     case 'TAB': {
-      if (state.mode !== 'navigate') return state;
+      // In edit mode: commit implied; move right/left with wrap
       const dc = action.shift ? -1 : 1;
       let col = state.col + dc;
       let row = state.row;
@@ -72,15 +76,14 @@ export function reduce(state: NavState, action: NavAction): NavState {
       }
       col = clamp(col, 0, COLS - 1);
       row = clamp(row, 0, ROWS - 1);
-      return { ...state, col, row };
+      return { col, row, mode: 'navigate' };
     }
 
     case 'ENTER': {
-      if (state.mode !== 'navigate') return state;
+      // In edit mode: commit implied; move down/up
       const dr = action.shift ? -1 : 1;
       const row = clamp(state.row + dr, 0, ROWS - 1);
-      if (row === state.row) return state;
-      return { ...state, row };
+      return { col: state.col, row, mode: 'navigate' };
     }
 
     case 'CLICK': {
@@ -91,5 +94,21 @@ export function reduce(state: NavState, action: NavAction): NavState {
 
     case 'SET_MODE':
       return { ...state, mode: action.mode };
+
+    case 'EDIT_START':
+      if (state.mode === 'edit') return state;
+      return { ...state, mode: 'edit' };
+
+    case 'COMMIT':
+      if (state.mode !== 'edit') return state;
+      return { ...state, mode: 'navigate' };
+
+    case 'CANCEL':
+      if (state.mode !== 'edit') return state;
+      return { ...state, mode: 'navigate' };
+
+    case 'DELETE':
+      // Only meaningful in navigate mode; Grid handles the actual clear
+      return state;
   }
 }

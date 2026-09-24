@@ -78,10 +78,10 @@ describe('nav reduce', () => {
 
   it('Enter clamps at boundaries', () => {
     const top: NavState = { col: 5, row: 0, mode: 'navigate' };
-    expect(reduce(top, { t: 'ENTER', shift: true })).toBe(top);
+    expect(reduce(top, { t: 'ENTER', shift: true })).toStrictEqual({ col: 5, row: 0, mode: 'navigate' });
 
     const bottom: NavState = { col: 5, row: ROWS - 1, mode: 'navigate' };
-    expect(reduce(bottom, { t: 'ENTER', shift: false })).toBe(bottom);
+    expect(reduce(bottom, { t: 'ENTER', shift: false })).toStrictEqual({ col: 5, row: ROWS - 1, mode: 'navigate' });
   });
 
   it('click sets col/row and returns to navigate', () => {
@@ -97,13 +97,54 @@ describe('nav reduce', () => {
     expect(reduce(base, { t: 'SET_MODE', mode: 'edit' })).toEqual({ ...base, mode: 'edit' });
   });
 
-  it('Tab does nothing in edit mode', () => {
+  it('Tab in edit mode commits and moves right', () => {
     const editing: NavState = { col: 5, row: 10, mode: 'edit' };
-    expect(reduce(editing, { t: 'TAB', shift: false })).toBe(editing);
+    expect(reduce(editing, { t: 'TAB', shift: false })).toEqual({ col: 6, row: 10, mode: 'navigate' });
   });
 
-  it('Enter does nothing in edit mode', () => {
+  it('Enter in edit mode commits and moves down', () => {
     const editing: NavState = { col: 5, row: 10, mode: 'edit' };
-    expect(reduce(editing, { t: 'ENTER', shift: false })).toBe(editing);
+    expect(reduce(editing, { t: 'ENTER', shift: false })).toEqual({ col: 5, row: 11, mode: 'navigate' });
+  });
+
+  it('Shift+Enter in edit mode commits and moves up', () => {
+    const editing: NavState = { col: 5, row: 10, mode: 'edit' };
+    expect(reduce(editing, { t: 'ENTER', shift: true })).toEqual({ col: 5, row: 9, mode: 'navigate' });
+  });
+
+  it('Shift+Tab in edit mode commits and moves left', () => {
+    const editing: NavState = { col: 5, row: 10, mode: 'edit' };
+    expect(reduce(editing, { t: 'TAB', shift: true })).toEqual({ col: 4, row: 10, mode: 'navigate' });
+  });
+
+  it('EDIT_START enters edit mode', () => {
+    expect(reduce(base, { t: 'EDIT_START' })).toEqual({ ...base, mode: 'edit' });
+  });
+
+  it('EDIT_START is no-op when already editing', () => {
+    const editing: NavState = { col: 5, row: 10, mode: 'edit' };
+    expect(reduce(editing, { t: 'EDIT_START' })).toBe(editing);
+  });
+
+  it('COMMIT returns to navigate from edit mode', () => {
+    const editing: NavState = { col: 5, row: 10, mode: 'edit' };
+    expect(reduce(editing, { t: 'COMMIT' })).toEqual({ col: 5, row: 10, mode: 'navigate' });
+  });
+
+  it('COMMIT is no-op in navigate mode', () => {
+    expect(reduce(base, { t: 'COMMIT' })).toBe(base);
+  });
+
+  it('CANCEL returns to navigate from edit mode', () => {
+    const editing: NavState = { col: 5, row: 10, mode: 'edit' };
+    expect(reduce(editing, { t: 'CANCEL' })).toEqual({ col: 5, row: 10, mode: 'navigate' });
+  });
+
+  it('CANCEL is no-op in navigate mode', () => {
+    expect(reduce(base, { t: 'CANCEL' })).toBe(base);
+  });
+
+  it('DELETE returns same state (Grid handles clearing)', () => {
+    expect(reduce(base, { t: 'DELETE' })).toBe(base);
   });
 });
