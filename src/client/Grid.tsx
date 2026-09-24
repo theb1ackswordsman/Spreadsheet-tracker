@@ -6,6 +6,7 @@ import { reduce, initNav, toCellId, colLabel } from './nav';
 import type { NavState, NavAction } from './nav';
 import { subscribeMeta, getRaw } from './store';
 import { commitEdits } from './commit';
+import type { Edit } from '../engine/types';
 
 // ── Constants ──
 
@@ -43,10 +44,11 @@ export interface GridHandle {
 
 export interface GridProps {
   onNavChange?: (nav: NavState, editBuffer: string) => void;
+  onOpenShortcuts?: () => void;
 }
 
 export const Grid = React.forwardRef<GridHandle, GridProps>(function Grid(
-  { onNavChange },
+  { onNavChange, onOpenShortcuts },
   ref
 ) {
   const [nav, setNav] = useState<NavState>(initNav);
@@ -185,6 +187,50 @@ export const Grid = React.forwardRef<GridHandle, GridProps>(function Grid(
     setNav({ col, row, mode: 'edit' });
   }, []);
 
+  // Clipboard copy handler
+  const handleCopy = useCallback((e: React.ClipboardEvent) => {
+    if (navRef.current.mode === 'edit') return;
+    const cellId = toCellId(navRef.current.col, navRef.current.row);
+    const raw = getRaw(cellId);
+    e.clipboardData.setData('text/plain', raw);
+    e.preventDefault();
+  }, []);
+
+  // Clipboard paste handler
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    if (navRef.current.mode === 'edit') return;
+    e.preventDefault();
+    const text = e.clipboardData.getData('text/plain');
+    if (!text) return;
+
+    const lines = text.split(/\r?\n/);
+    if (lines.length > 1 && lines[lines.length - 1] === '') {
+      lines.pop();
+    }
+
+    const edits: Edit[] = [];
+    const startCol = navRef.current.col;
+    const startRow = navRef.current.row;
+
+    for (let rIdx = 0; rIdx < lines.length; rIdx++) {
+      const targetRow = startRow + rIdx;
+      if (targetRow >= ROWS) break;
+
+      const cols = lines[rIdx]!.split('\t');
+      for (let cIdx = 0; cIdx < cols.length; cIdx++) {
+        const targetCol = startCol + cIdx;
+        if (targetCol >= COLS) break;
+
+        const cell = toCellId(targetCol, targetRow);
+        edits.push({ cell, raw: cols[cIdx]! });
+      }
+    }
+
+    if (edits.length > 0) {
+      commitEdits(edits);
+    }
+  }, []);
+
   // Keyboard handler on the grid container
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     setNav(prev => {
@@ -209,9 +255,6 @@ export const Grid = React.forwardRef<GridHandle, GridProps>(function Grid(
             e.preventDefault();
             return reduce(prev, { t: 'ENTER', shift: true });
           }
-          // Enter without shift does NOT move in navigate mode; starts editing would be another option
-          // but per P2b, Enter moves. Actually, re-reading: the existing nav behavior has Enter moving.
-          // But now with editing, we should keep Enter moving in navigate mode.
           e.preventDefault();
           return reduce(prev, { t: 'ENTER', shift: false });
         case 'F2': {
@@ -227,6 +270,11 @@ export const Grid = React.forwardRef<GridHandle, GridProps>(function Grid(
           e.preventDefault();
           const cellId = toCellId(prev.col, prev.row);
           commitEdits([{ cell: cellId, raw: '' }]);
+          return prev;
+        }
+        case '?': {
+          e.preventDefault();
+          onOpenShortcuts?.();
           return prev;
         }
         default: {
@@ -248,7 +296,7 @@ export const Grid = React.forwardRef<GridHandle, GridProps>(function Grid(
       }
       return prev;
     });
-  }, []);
+  }, [onOpenShortcuts]);
 
   // Scroll active cell into view
   useEffect(() => {
@@ -353,7 +401,7 @@ export const Grid = React.forwardRef<GridHandle, GridProps>(function Grid(
           display: 'flex',
         }}
       >
-        <div style={rowHeaderStyle}>{r + 1}</div>
+        <div style={rowHeaderStyle} role="rowheader" aria-colindex={1}>{r + 1}</div>
         <div style={{ position: 'relative', width: TOTAL_WIDTH, height: ROW_H }}>
           {cells}
         </div>
@@ -368,6 +416,8 @@ export const Grid = React.forwardRef<GridHandle, GridProps>(function Grid(
     colHeaders.push(
       <div
         key={c}
+        role="columnheader"
+        aria-colindex={c + 2}
         style={{
           width: COL_W,
           height: ROW_H,
@@ -396,6 +446,8 @@ export const Grid = React.forwardRef<GridHandle, GridProps>(function Grid(
       tabIndex={0}
       onScroll={handleScroll}
       onKeyDown={handleKeyDown}
+      onCopy={handleCopy}
+      onPaste={handlePaste}
       style={{
         position: 'relative',
         width: '100%',
@@ -409,6 +461,8 @@ export const Grid = React.forwardRef<GridHandle, GridProps>(function Grid(
     >
       {/* Sticky column header row */}
       <div
+        role="row"
+        aria-rowindex={1}
         style={{
           position: 'sticky',
           top: 0,
@@ -421,6 +475,7 @@ export const Grid = React.forwardRef<GridHandle, GridProps>(function Grid(
       >
         {/* Corner cell */}
         <div
+          role="presentation"
           style={{
             position: 'sticky',
             left: 0,

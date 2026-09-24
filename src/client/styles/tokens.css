@@ -27,3 +27,57 @@
   --presence-5: #4D7C0F;
   --presence-6: #0E7490;
 }
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  height: 100%;
+}
+
+#root {
+  height: 100%;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.btn-text {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 18px;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.btn-text:hover {
+  border-color: var(--border);
+}
+
+.btn-bordered {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 18px;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.btn-bordered:hover {
+  background: var(--surface);
+}

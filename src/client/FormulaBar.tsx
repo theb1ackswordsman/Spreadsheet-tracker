@@ -5,13 +5,25 @@ import { commitEdits } from './commit';
 
 // ── Error explanations (from DESIGN "Components") ──
 
-const ERROR_EXPLANATIONS: Record<ErrCode, string> = {
-  '#CIRCULAR!': 'Circular reference: this cell depends on itself',
-  '#DIV/0!': 'Division by zero',
-  '#NAME?': 'Unknown function',
-  '#REF!': 'Reference outside the sheet',
-  '#VALUE!': 'Value error: check the formula',
-};
+function getErrorExplanation(error: ErrCode, raw: string): string {
+  switch (error) {
+    case '#CIRCULAR!':
+      return 'Circular reference: this cell depends on itself';
+    case '#DIV/0!':
+      return 'Division by zero';
+    case '#NAME?': {
+      const match = raw.match(/=([A-Za-z0-9_]+)\(/);
+      if (match && match[1]) {
+        return `Unknown function ${match[1].toUpperCase()}`;
+      }
+      return 'Unknown function';
+    }
+    case '#REF!':
+      return 'Reference outside the sheet';
+    case '#VALUE!':
+      return 'Value error: check the formula';
+  }
+}
 
 interface FormulaBarProps {
   cellId: CellId;
@@ -92,7 +104,7 @@ export function FormulaBar({
     }
   };
 
-  const errorText = result.e !== null ? ERROR_EXPLANATIONS[result.e] : '';
+  const errorText = result.e !== null ? getErrorExplanation(result.e, raw) : '';
 
   return (
     <div
@@ -171,21 +183,25 @@ export function FormulaBar({
       </div>
 
       {/* Error explanation line */}
-      <div
-        style={{
-          height: 20,
-          lineHeight: '20px',
-          fontSize: '12px',
-          color: 'var(--danger)',
-          paddingLeft: 'calc(64px + 32px + var(--space-2))',
-          paddingRight: 'var(--space-2)',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}
-      >
-        {errorText}
-      </div>
+      {result.e !== null && (
+        <div
+          style={{
+            height: 24,
+            lineHeight: '24px',
+            fontSize: '12px',
+            color: 'var(--danger)',
+            background: 'var(--danger-weak)',
+            paddingLeft: 'calc(64px + 32px + var(--space-2))',
+            paddingRight: 'var(--space-2)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            borderTop: '1px solid var(--border)',
+          }}
+        >
+          {errorText}
+        </div>
+      )}
     </div>
   );
 }

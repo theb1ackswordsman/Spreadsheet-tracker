@@ -96,7 +96,14 @@ function removeToast(id: number): void {
 const recentEdits: Map<CellId, number> = new Map(); // cell -> timestamp
 const OVERWRITE_WINDOW = 10_000; // 10 seconds
 
+let silentEditsActive = false;
+
+export function setSilentEdits(active: boolean): void {
+  silentEditsActive = active;
+}
+
 export function markRecentEdit(cell: CellId): void {
+  if (silentEditsActive) return;
   recentEdits.set(cell, Date.now());
 }
 
@@ -181,6 +188,19 @@ export function setRawMirror(id: CellId, raw: string): void {
   }
 }
 
+// ── Snapshot subscription (for sample data auto-send) ──
+
+export type SnapshotListener = (v: number, cellCount: number) => void;
+const snapshotListeners: Set<SnapshotListener> = new Set();
+let firstSnapshotReceived = false;
+
+export function subscribeSnapshot(cb: SnapshotListener): () => void {
+  snapshotListeners.add(cb);
+  return () => {
+    snapshotListeners.delete(cb);
+  };
+}
+
 /** Replace entire raw mirror (for SNAPSHOT). Clears old entries, notifies subscribers. */
 export function replaceRawMirror(cells: [CellId, string][]): void {
   // Collect old keys to clear
@@ -194,6 +214,13 @@ export function replaceRawMirror(cells: [CellId, string][]): void {
   for (const id of oldKeys) {
     if (!newKeys.has(id)) {
       setRawMirror(id, '');
+    }
+  }
+
+  if (!firstSnapshotReceived) {
+    firstSnapshotReceived = true;
+    for (const cb of snapshotListeners) {
+      cb(meta.version, cells.length);
     }
   }
 }

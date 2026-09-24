@@ -2,17 +2,24 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Grid, type GridHandle } from './Grid';
 import { FormulaBar } from './FormulaBar';
 import { toCellId, type NavState } from './nav';
-import { useMeta } from './store';
+import { useMeta, addToast } from './store';
 import { sendSelect, getMyU, dropConnection } from './socket';
+import { sendSampleData } from './sample';
 import type { User } from '../shared/protocol';
+import type { Stats } from '../engine/types';
 
 // ── Debug flag ──
 const isDebug = typeof window !== 'undefined' && window.location.search.includes('debug');
 
 export function App() {
+  const [title, setTitle] = useState('Untitled spreadsheet');
   const [nav, setNav] = useState<NavState>({ col: 0, row: 0, mode: 'navigate' });
   const [editBuffer, setEditBuffer] = useState('');
+  const [hintDismissed, setHintDismissed] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+
   const gridRef = useRef<GridHandle>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
   const meta = useMeta();
 
   const handleNavChange = useCallback((n: NavState, buf: string) => {
@@ -41,6 +48,40 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Global keydown for Shortcuts popover (Esc closes, ? opens when not typing in input)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && shortcutsOpen) {
+        e.preventDefault();
+        setShortcutsOpen(false);
+        gridRef.current?.refocus();
+      } else if (e.key === '?' && !shortcutsOpen) {
+        const target = e.target as HTMLElement | null;
+        const tag = target?.tagName;
+        if (tag !== 'INPUT' && tag !== 'TEXTAREA') {
+          e.preventDefault();
+          setShortcutsOpen(true);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [shortcutsOpen]);
+
+  // Outside click handler for Shortcuts popover
+  useEffect(() => {
+    if (!shortcutsOpen) return;
+    const handlePointerDown = (e: PointerEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        const btn = document.getElementById('btn-shortcuts');
+        if (btn && btn.contains(e.target as Node)) return;
+        setShortcutsOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    return () => document.removeEventListener('pointerdown', handlePointerDown);
+  }, [shortcutsOpen]);
+
   return (
     <div
       style={{
@@ -53,7 +94,12 @@ export function App() {
         overflow: 'hidden',
       }}
     >
-      <TopBar users={meta.users} />
+      <TopBar
+        title={title}
+        onTitleChange={setTitle}
+        connection={meta.connection}
+        users={meta.users}
+      />
       {meta.connection === 'reconnecting' && (
         <ReconnectingBanner pendingCount={meta.pendingCount} />
       )}
@@ -61,20 +107,19 @@ export function App() {
         <div style={{ padding: '0 var(--space-2)', background: 'var(--surface)', borderBottom: '1px solid var(--border)' }}>
           <button
             onClick={dropConnection}
-            style={{
-              fontFamily: 'var(--font-ui)',
-              fontSize: '12px',
-              padding: '2px 8px',
-              border: '1px solid var(--border)',
-              borderRadius: 'var(--radius)',
-              background: 'var(--bg)',
-              color: 'var(--text)',
-              cursor: 'pointer',
-            }}
+            className="btn-bordered"
+            style={{ fontSize: '12px', padding: '2px 8px' }}
           >
             Drop connection
           </button>
         </div>
+      )}
+      <Toolbar
+        onSampleData={sendSampleData}
+        onToggleShortcuts={() => setShortcutsOpen(prev => !prev)}
+      />
+      {!hintDismissed && (
+        <HintBar onDismiss={() => setHintDismissed(true)} />
       )}
       <FormulaBar
         cellId={cellId}
@@ -82,16 +127,65 @@ export function App() {
         cellEditBuffer={editBuffer}
         onRefocusGrid={handleRefocusGrid}
       />
-      <Grid ref={gridRef} onNavChange={handleNavChange} />
+      <Grid
+        ref={gridRef}
+        onNavChange={handleNavChange}
+        onOpenShortcuts={() => setShortcutsOpen(true)}
+      />
+      <StatusBar
+        usersCount={meta.users.length}
+        version={meta.version}
+        stats={meta.stats}
+      />
+      {shortcutsOpen && (
+        <ShortcutsPopover
+          popoverRef={popoverRef}
+          onClose={() => {
+            setShortcutsOpen(false);
+            gridRef.current?.refocus();
+          }}
+        />
+      )}
       <ToastContainer toasts={meta.toasts} />
     </div>
   );
 }
 
-// ── Top bar with avatars ──
+// ── Top bar with editable title, connection text, avatars, share ──
 
-function TopBar({ users }: { users: User[] }) {
+function TopBar({
+  title,
+  onTitleChange,
+  connection,
+  users,
+}: {
+  title: string;
+  onTitleChange: (t: string) => void;
+  connection: 'connected' | 'reconnecting';
+  users: User[];
+}) {
   const myU = getMyU();
+
+  const handleShare = () => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(window.location.href);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = window.location.href;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+    } catch {
+      // fallback
+    }
+    addToast('Link copied');
+  };
+
+  const connectionText = connection === 'connected' ? 'Connected' : 'Reconnecting...';
+
   return (
     <div
       style={{
@@ -102,17 +196,56 @@ function TopBar({ users }: { users: User[] }) {
         borderBottom: '1px solid var(--border)',
         background: 'var(--bg)',
         flexShrink: 0,
-        gap: 'var(--space-2)',
+        gap: 'var(--space-3)',
       }}
     >
-      <div style={{ fontWeight: 600, fontSize: '14px', flex: 1 }}>
-        Spreadsheet
+      <input
+        type="text"
+        value={title}
+        onChange={(e) => onTitleChange(e.target.value)}
+        aria-label="Sheet title"
+        style={{
+          fontWeight: 600,
+          fontSize: '14px',
+          color: 'var(--text)',
+          background: 'transparent',
+          border: '1px solid transparent',
+          borderRadius: 'var(--radius)',
+          padding: '2px 6px',
+          outline: 'none',
+          fontFamily: 'var(--font-ui)',
+          minWidth: 120,
+          maxWidth: 240,
+        }}
+        onFocus={(e) => {
+          e.target.style.borderColor = 'var(--accent)';
+        }}
+        onBlur={(e) => {
+          e.target.style.borderColor = 'transparent';
+        }}
+      />
+      <div
+        style={{
+          fontSize: '12px',
+          color: 'var(--muted)',
+          userSelect: 'none',
+        }}
+      >
+        {connectionText}
       </div>
+      <div style={{ flex: 1 }} />
       <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
         {users.filter(u => u.u !== myU).map(u => (
           <Avatar key={u.u} user={u} />
         ))}
       </div>
+      <button
+        type="button"
+        onClick={handleShare}
+        className="btn-bordered"
+      >
+        Share
+      </button>
     </div>
   );
 }
@@ -158,6 +291,208 @@ function ReconnectingBanner({ pendingCount }: { pendingCount: number }) {
       }}
     >
       Reconnecting{pendingCount > 0 ? ` (${pendingCount} queued edit${pendingCount > 1 ? 's' : ''})` : ''}
+    </div>
+  );
+}
+
+// ── Toolbar ──
+
+function Toolbar({
+  onSampleData,
+  onToggleShortcuts,
+}: {
+  onSampleData: () => void;
+  onToggleShortcuts: () => void;
+}) {
+  return (
+    <div
+      style={{
+        height: 36,
+        display: 'flex',
+        alignItems: 'center',
+        padding: '0 var(--space-4)',
+        borderBottom: '1px solid var(--border)',
+        background: 'var(--bg)',
+        flexShrink: 0,
+        gap: 'var(--space-2)',
+      }}
+    >
+      <button
+        type="button"
+        className="btn-text"
+        onClick={onSampleData}
+      >
+        Sample data
+      </button>
+      <button
+        type="button"
+        id="btn-shortcuts"
+        className="btn-text"
+        onClick={onToggleShortcuts}
+      >
+        Shortcuts
+      </button>
+    </div>
+  );
+}
+
+// ── Dismissible Hint Bar ──
+
+function HintBar({ onDismiss }: { onDismiss: () => void }) {
+  return (
+    <div
+      style={{
+        background: 'var(--surface)',
+        borderBottom: '1px solid var(--border)',
+        padding: '6px var(--space-4)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        fontSize: '12px',
+        color: 'var(--text)',
+        flexShrink: 0,
+      }}
+    >
+      <span>Type = to start a formula. Open this page in another window to collaborate.</span>
+      <button
+        type="button"
+        className="btn-text"
+        onClick={onDismiss}
+        style={{ fontSize: '12px', padding: '2px 8px' }}
+      >
+        Dismiss
+      </button>
+    </div>
+  );
+}
+
+// ── Status Bar ──
+
+function StatusBar({
+  usersCount,
+  version,
+  stats,
+}: {
+  usersCount: number;
+  version: number;
+  stats: Stats | null;
+}) {
+  const recalcText = stats
+    ? `${stats.scope} of ${stats.populated.toLocaleString()} cells, ${stats.ms.toFixed(1)} ms`
+    : '0 of 0 cells, 0.0 ms';
+
+  return (
+    <div
+      style={{
+        height: 28,
+        display: 'flex',
+        alignItems: 'center',
+        padding: '0 var(--space-4)',
+        borderTop: '1px solid var(--border)',
+        background: 'var(--surface)',
+        fontSize: '12px',
+        color: 'var(--muted)',
+        flexShrink: 0,
+        gap: 'var(--space-4)',
+        userSelect: 'none',
+      }}
+    >
+      <div>{usersCount} {usersCount === 1 ? 'user' : 'users'} online</div>
+      <div>v{version}</div>
+      <div>{recalcText}</div>
+    </div>
+  );
+}
+
+// ── Shortcuts Popover ──
+
+function ShortcutsPopover({
+  popoverRef,
+  onClose,
+}: {
+  popoverRef: React.RefObject<HTMLDivElement>;
+  onClose: () => void;
+}) {
+  const shortcuts: Array<[string, string]> = [
+    ['Arrow keys', 'Navigate cells'],
+    ['Enter', 'Commit and move down'],
+    ['Shift + Enter', 'Commit and move up'],
+    ['Tab', 'Commit and move right'],
+    ['Shift + Tab', 'Commit and move left'],
+    ['F2', 'Edit active cell'],
+    ['Delete / Backspace', 'Clear cell content'],
+    ['Escape', 'Cancel editing / close popover'],
+    ['Ctrl + C', 'Copy cell raw value'],
+    ['Ctrl + V', 'Paste TSV data'],
+    ['?', 'Open shortcuts'],
+  ];
+
+  return (
+    <div
+      ref={popoverRef}
+      style={{
+        position: 'fixed',
+        top: 84,
+        left: 'var(--space-4)',
+        zIndex: 1000,
+        background: 'var(--bg)',
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius)',
+        boxShadow: 'var(--shadow-pop)',
+        padding: 'var(--space-3) var(--space-4)',
+        width: 320,
+        fontSize: '12px',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: 'var(--space-2)',
+          paddingBottom: 'var(--space-1)',
+          borderBottom: '1px solid var(--border)',
+        }}
+      >
+        <div style={{ fontWeight: 600, fontSize: '13px', color: 'var(--text)' }}>
+          Keyboard shortcuts
+        </div>
+        <button
+          type="button"
+          className="btn-text"
+          onClick={onClose}
+          style={{ fontSize: '12px', padding: '2px 6px' }}
+        >
+          Close
+        </button>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+        {shortcuts.map(([key, desc]) => (
+          <div
+            key={key}
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              lineHeight: '20px',
+            }}
+          >
+            <span
+              style={{
+                fontFamily: 'var(--font-mono)',
+                color: 'var(--text)',
+                background: 'var(--surface)',
+                padding: '1px 4px',
+                borderRadius: 'var(--radius)',
+                border: '1px solid var(--border)',
+              }}
+            >
+              {key}
+            </span>
+            <span style={{ color: 'var(--muted)' }}>{desc}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

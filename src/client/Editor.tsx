@@ -91,6 +91,7 @@ export function Editor({ col, row, initialValue, onChange, onCommit, onCancel, o
       onKeyDown={handleKeyDown}
       onBlur={handleBlur}
       style={style}
+      role="gridcell"
       aria-colindex={col + 2}
     />
   );
