@@ -1,6 +1,6 @@
 import type { WebSocket } from 'ws';
 import type { CellId, Edit } from '../engine/types';
-import type { C2S, S2C, Op, User } from '../shared/protocol';
+import type { C2S, S2C, Op, User, Role } from '../shared/protocol';
 import { COLS, ROWS } from '../engine/constants';
 import { randomUUID } from 'node:crypto';
 
@@ -21,6 +21,7 @@ export interface Client {
   color: string;
   cell: CellId | null;
   lastOpId: number;
+  role?: Role;
 }
 
 interface Session {
@@ -137,7 +138,7 @@ export class Room {
     try {
       msg = JSON.parse(data) as C2S;
     } catch {
-      this.sendTo(client, { t: 'ERROR', msg: 'invalid JSON' });
+      this.sendTo(client, { t: 'ERROR', code: 'bad_request', msg: 'invalid JSON' });
       return;
     }
 
@@ -244,7 +245,7 @@ export class Room {
     // Validate
     const err = validateEdits(edits);
     if (err !== null) {
-      this.sendTo(client, { t: 'ERROR', msg: err });
+      this.sendTo(client, { t: 'ERROR', code: 'bad_request', msg: err });
       return;
     }
 
@@ -302,6 +303,7 @@ export class Room {
       cells,
       you: { u: client.u, name: client.name, color: client.color },
       users,
+      role: client.role ?? 'editor',
     });
   }
 

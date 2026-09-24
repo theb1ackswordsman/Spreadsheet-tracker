@@ -19,6 +19,7 @@ export type FromWorker = { t: 'PATCH'; cells: PatchCell[]; stats: Stats };
 Copy to `src/shared/protocol.ts`:
 ```ts
 import type { CellId, Edit } from '../engine/types';
+export type Role = 'owner' | 'editor' | 'viewer';
 export type Op = { v: number; u: string; opId: number; edits: Edit[] };
 export type User = { u: string; name: string; color: string; cell: CellId | null };
 export type C2S =
@@ -27,11 +28,12 @@ export type C2S =
   | { t: 'EDIT'; opId: number; edits: Edit[] }
   | { t: 'SELECT'; cell: CellId | null };
 export type S2C =
-  | { t: 'SNAPSHOT'; v: number; cells: [CellId, string][]; you: { u: string; name: string; color: string }; users: User[] }
+  | { t: 'SNAPSHOT'; v: number; cells: [CellId, string][]; you: { u: string; name: string; color: string }; users: User[]; role: Role }
   | { t: 'OPS'; ops: Op[] }
   | { t: 'OP'; op: Op }
   | { t: 'PRESENCE'; users: User[] }
-  | { t: 'ERROR'; msg: string };
+  | { t: 'ROLE'; role: Role }
+  | { t: 'ERROR'; code: 'forbidden' | 'signin_required' | 'read_only' | 'bad_request'; msg: string };
 ```
 `cid` is a random 128-bit id the client generates once per tab and keeps in memory. The server uses it as a dedupe key to reuse `u` and `lastOpId` across reconnects within 5 minutes. It is never an identity shown to others.
 

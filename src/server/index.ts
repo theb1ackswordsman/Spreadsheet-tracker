@@ -256,7 +256,7 @@ export function startServer(opts: ServerOptions = {}): ServerHandle {
       try {
         msg = JSON.parse(str) as C2S;
       } catch {
-        ws.send(JSON.stringify({ t: 'ERROR', msg: 'invalid JSON' }));
+        ws.send(JSON.stringify({ t: 'ERROR', code: 'bad_request', msg: 'invalid JSON' }));
         return;
       }
 
@@ -268,7 +268,7 @@ export function startServer(opts: ServerOptions = {}): ServerHandle {
           client = room.addClient(ws, sanitized, msg.cid);
           room.handleMessage(client, str);
         } else {
-          ws.send(JSON.stringify({ t: 'ERROR', msg: 'must JOIN first' }));
+          ws.send(JSON.stringify({ t: 'ERROR', code: 'bad_request', msg: 'must JOIN first' }));
         }
         return;
       }

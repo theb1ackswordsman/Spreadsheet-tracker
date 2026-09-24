@@ -27,3 +27,11 @@ Always trim output: `npm run typecheck 2>&1 | head -30`. Never print whole files
 - Don't re-read files you just wrote; use grep or line ranges on big files.
 - Make targeted edits; don't rewrite whole files.
 - Don't restate the task or explain code in replies.
+
+## Auth rules (added)
+- Allowed deps now also include: google-auth-library. Nothing else.
+- Identity comes ONLY from the verified server session cookie, never from client payloads.
+- `auth: 'off'` exists only as a startServer() option for tests and the sim. Never read it from env or a query param.
+- GOOGLE_CLIENT_SECRET lives only in server env (.env, gitignored). Never in client code, logs, or commits.
+- protocol.ts may change ONLY as specified in docs/ARCH-AUTH.md "Protocol changes" during P9a.
+
