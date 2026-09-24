@@ -11,10 +11,11 @@ export function isStressLoaded(): boolean {
 }
 
 /**
- * Generate 11,001 stress edits:
+ * Generate 11,004 stress edits:
  * - A1 = 1
  * - B1:K1000 = =$A$1*<col number> (10,000 formulas, fan-out from A1)
  * - M1 = =A1, M2..M1000 = =M<prev>+1 (1,000-deep chain from A1)
+ * - O1 = 5, P1 = =O1*2, Q1 = =P1+1 (independent 3-cell chain)
  */
 export function generateStressEdits(): Edit[] {
   const edits: Edit[] = [];
@@ -37,10 +38,15 @@ export function generateStressEdits(): Edit[] {
     edits.push({ cell: `M${r}`, raw: `=M${r - 1}+1` });
   }
 
+  // O1 = 5, P1 = =O1*2, Q1 = =P1+1
+  edits.push({ cell: 'O1', raw: '5' });
+  edits.push({ cell: 'P1', raw: '=O1*2' });
+  edits.push({ cell: 'Q1', raw: '=P1+1' });
+
   return edits;
 }
 
-/** Generate clearing edits for all 11,001 stress cells */
+/** Generate clearing edits for all 11,004 stress cells */
 export function generateClearStressEdits(): Edit[] {
   const edits: Edit[] = [];
   edits.push({ cell: 'A1', raw: '' });
@@ -53,6 +59,9 @@ export function generateClearStressEdits(): Edit[] {
   for (let r = 1; r <= 1000; r++) {
     edits.push({ cell: `M${r}`, raw: '' });
   }
+  edits.push({ cell: 'O1', raw: '' });
+  edits.push({ cell: 'P1', raw: '' });
+  edits.push({ cell: 'Q1', raw: '' });
   return edits;
 }
 

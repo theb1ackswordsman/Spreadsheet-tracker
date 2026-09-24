@@ -16,9 +16,9 @@ import {
 } from './store';
 
 describe('stress test data', () => {
-  it('generates 11,001 stress edits (A1 + 10,000 formulas + 1,000 chain)', () => {
+  it('generates 11,004 stress edits (A1 + 10,000 formulas + 1,000 chain + 3 independent)', () => {
     const edits = generateStressEdits();
-    expect(edits.length).toBe(11001);
+    expect(edits.length).toBe(11004);
 
     // A1 = 1
     const a1 = edits.find(e => e.cell === 'A1');
@@ -49,11 +49,22 @@ describe('stress test data', () => {
     const m1000 = edits.find(e => e.cell === 'M1000');
     expect(m1000).toBeDefined();
     expect(m1000!.raw).toBe('=M999+1');
+
+    // O1 = 5, P1 = =O1*2, Q1 = =P1+1
+    const o1 = edits.find(e => e.cell === 'O1');
+    expect(o1).toBeDefined();
+    expect(o1!.raw).toBe('5');
+    const p1 = edits.find(e => e.cell === 'P1');
+    expect(p1).toBeDefined();
+    expect(p1!.raw).toBe('=O1*2');
+    const q1 = edits.find(e => e.cell === 'Q1');
+    expect(q1).toBeDefined();
+    expect(q1!.raw).toBe('=P1+1');
   });
 
-  it('generates 11,001 clearing edits with raw: ""', () => {
+  it('generates 11,004 clearing edits with raw: ""', () => {
     const clearEdits = generateClearStressEdits();
-    expect(clearEdits.length).toBe(11001);
+    expect(clearEdits.length).toBe(11004);
     for (const edit of clearEdits) {
       expect(edit.raw).toBe('');
     }
