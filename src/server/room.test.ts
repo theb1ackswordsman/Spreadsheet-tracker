@@ -56,7 +56,7 @@ describe('server validation', () => {
       readyState: 1,
       send(data: string) { sent.push(data); },
     };
-    const client = room.addClient(mockWs as never, 'Alice');
+    const client = room.addClient(mockWs as never, 'Alice', 'cid-1');
 
     // First edit succeeds
     room.handleEdit(client, 1, [{ cell: 'A1', raw: 'hello' }]);
@@ -81,7 +81,7 @@ describe('server validation', () => {
   it('deletes raw key when raw is empty string', () => {
     const room = new Room('test-clear');
     const mockWs = { readyState: 1, send() {} };
-    const client = room.addClient(mockWs as never, 'Bob');
+    const client = room.addClient(mockWs as never, 'Bob', 'cid-2');
 
     room.handleEdit(client, 1, [{ cell: 'B1', raw: 'val' }]);
     expect(room.getRaw().has('B1')).toBe(true);

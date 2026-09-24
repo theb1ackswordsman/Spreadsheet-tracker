@@ -12,14 +12,16 @@ function startServer(): { port: number; cleanup: () => Promise<void>; room: Room
 
   wss.on('connection', (ws) => {
     let client: ReturnType<typeof room.addClient> | null = null;
+    let clientCid: string | undefined;
 
     ws.on('message', (data) => {
       const str = typeof data === 'string' ? data : data.toString('utf8');
       const msg = JSON.parse(str) as C2S;
 
       if (!client) {
-        if (msg.t === 'JOIN') {
-          client = room.addClient(ws, msg.name);
+        if (msg.t === 'JOIN' || msg.t === 'RESUME') {
+          clientCid = msg.cid;
+          client = room.addClient(ws, msg.name, msg.cid);
           room.handleMessage(client, str);
         }
         return;
@@ -28,7 +30,7 @@ function startServer(): { port: number; cleanup: () => Promise<void>; room: Room
     });
 
     ws.on('close', () => {
-      if (client) room.removeClient(client.u);
+      if (client) room.removeClient(client.u, clientCid);
     });
   });
 
@@ -104,8 +106,8 @@ describe('integration: two clients', () => {
     await new Promise<void>((r) => { c2.ws.on('open', r); });
 
     // Both JOIN
-    sendMsg(c1.ws, { t: 'JOIN', sheetId: 'integration', name: 'Alice' });
-    sendMsg(c2.ws, { t: 'JOIN', sheetId: 'integration', name: 'Bob' });
+    sendMsg(c1.ws, { t: 'JOIN', sheetId: 'integration', name: 'Alice', cid: 'cid-alice' });
+    sendMsg(c2.ws, { t: 'JOIN', sheetId: 'integration', name: 'Bob', cid: 'cid-bob' });
 
     // Wait for snapshots
     await c1.waitFor((m) => m.t === 'SNAPSHOT');

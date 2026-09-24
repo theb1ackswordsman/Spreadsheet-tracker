@@ -23,12 +23,22 @@ export interface Client {
   lastOpId: number;
 }
 
+interface Session {
+  u: string;
+  lastOpId: number;
+  name: string;
+  color: string;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
 // ── Constants ──
 
 const CELL_RE = /^[A-Z]{1,2}[0-9]{1,4}$/;
 const MAX_RAW = 1000;
 const MAX_EDITS = 5000;
 const OP_LOG_SIZE = 5000;
+const SESSION_TTL = 5 * 60 * 1000; // 5 minutes
+const PRESENCE_THROTTLE = 50; // ms
 
 // ── Room ──
 
@@ -39,6 +49,9 @@ export class Room {
   private readonly opLog: Op[] = [];
   private opLogStart = 0; // version of the first entry in opLog ring
   private readonly clients: Map<string, Client> = new Map();
+  private readonly sessions: Map<string, Session> = new Map(); // cid -> session
+  private presenceTimer: ReturnType<typeof setTimeout> | null = null;
+  private presenceDirty = false;
 
   constructor(sheetId: string) {
     this.sheetId = sheetId;
@@ -46,18 +59,61 @@ export class Room {
 
   // ── Client management ──
 
-  addClient(ws: WebSocket, name: string): Client {
-    const u = randomUUID();
+  addClient(ws: WebSocket, name: string, cid: string | undefined): Client {
     const sanitized = sanitizeName(name);
+
+    // Check for existing session by cid
+    if (cid) {
+      const session = this.sessions.get(cid);
+      if (session) {
+        // Reuse identity
+        if (session.timer !== null) {
+          clearTimeout(session.timer);
+          session.timer = null;
+        }
+        const client: Client = {
+          ws,
+          u: session.u,
+          name: session.name,
+          color: session.color,
+          cell: null,
+          lastOpId: session.lastOpId,
+        };
+        this.clients.set(client.u, client);
+        // Update session name in case it changed
+        session.name = sanitized;
+        return client;
+      }
+    }
+
+    // New session
+    const u = randomUUID();
     const color = PALETTE[colorIdx % PALETTE.length]!;
     colorIdx++;
     const client: Client = { ws, u, name: sanitized, color, cell: null, lastOpId: 0 };
     this.clients.set(u, client);
+
+    // Store session
+    if (cid) {
+      this.sessions.set(cid, { u, lastOpId: 0, name: sanitized, color, timer: null });
+    }
+
     return client;
   }
 
-  removeClient(u: string): void {
+  removeClient(u: string, cid: string | undefined): void {
     this.clients.delete(u);
+    // Schedule session expiry
+    if (cid) {
+      const session = this.sessions.get(cid);
+      if (session) {
+        session.timer = setTimeout(() => {
+          this.sessions.delete(cid);
+        }, SESSION_TTL);
+      }
+    }
+    // Broadcast presence removal
+    this.scheduleBroadcastPresence();
   }
 
   // ── Message handling ──
@@ -81,7 +137,9 @@ export class Room {
       case 'EDIT':
         this.handleEdit(client, msg.opId, msg.edits);
         break;
-      // SELECT is a later phase (presence)
+      case 'SELECT':
+        this.handleSelect(client, msg.cell);
+        break;
       default:
         break;
     }
@@ -91,33 +149,67 @@ export class Room {
 
   private handleJoin(client: Client): void {
     this.sendSnapshot(client);
+    this.scheduleBroadcastPresence();
   }
 
   // ── RESUME ──
 
   private handleResume(client: Client, lastVersion: number): void {
+    // Server restarted or client ahead: send SNAPSHOT
+    if (lastVersion > this.version) {
+      this.sendSnapshot(client);
+      this.scheduleBroadcastPresence();
+      return;
+    }
+
     const oldestV = this.opLogStart;
     if (lastVersion >= oldestV - 1 && lastVersion < this.version) {
       // Can send incremental OPS
       const startIdx = lastVersion - this.opLogStart;
       const ops = this.opLog.slice(Math.max(0, startIdx));
-      // Filter only ops after lastVersion
       const filtered = ops.filter(op => op.v > lastVersion);
       if (filtered.length > 0) {
         this.sendTo(client, { t: 'OPS', ops: filtered });
+        this.scheduleBroadcastPresence();
         return;
       }
     }
-    if (lastVersion >= this.version) {
-      // Client is up to date, just send snapshot anyway (simplest)
-      // Actually if equal, they're caught up—send empty OPS or just snapshot
-      if (lastVersion === this.version) {
-        this.sendTo(client, { t: 'OPS', ops: [] });
-        return;
-      }
+    if (lastVersion === this.version) {
+      this.sendTo(client, { t: 'OPS', ops: [] });
+      this.scheduleBroadcastPresence();
+      return;
     }
     // Otherwise full snapshot
     this.sendSnapshot(client);
+    this.scheduleBroadcastPresence();
+  }
+
+  // ── SELECT ──
+
+  private handleSelect(client: Client, cell: CellId | null): void {
+    client.cell = cell;
+    this.scheduleBroadcastPresence();
+  }
+
+  // ── Throttled presence broadcast ──
+
+  private scheduleBroadcastPresence(): void {
+    this.presenceDirty = true;
+    if (this.presenceTimer !== null) return;
+    this.presenceTimer = setTimeout(() => {
+      this.presenceTimer = null;
+      if (!this.presenceDirty) return;
+      this.presenceDirty = false;
+      this.broadcastPresence();
+    }, PRESENCE_THROTTLE);
+  }
+
+  private broadcastPresence(): void {
+    const users = this.getUserList();
+    const msg: S2C = { t: 'PRESENCE', users };
+    for (const c of this.clients.values()) {
+      this.sendTo(c, msg);
+    }
   }
 
   // ── EDIT ──
@@ -137,6 +229,14 @@ export class Room {
 
     client.lastOpId = opId;
     this.version++;
+
+    // Update session lastOpId
+    for (const [, session] of this.sessions) {
+      if (session.u === client.u) {
+        session.lastOpId = opId;
+        break;
+      }
+    }
 
     // Apply to raw map
     for (const edit of edits) {
@@ -174,10 +274,7 @@ export class Room {
     for (const [id, raw] of this.raw) {
       cells.push([id, raw]);
     }
-    const users: User[] = [];
-    for (const c of this.clients.values()) {
-      users.push({ u: c.u, name: c.name, color: c.color, cell: c.cell });
-    }
+    const users = this.getUserList();
     this.sendTo(client, {
       t: 'SNAPSHOT',
       v: this.version,
@@ -195,11 +292,23 @@ export class Room {
     }
   }
 
+  // ── Helpers ──
+
+  private getUserList(): User[] {
+    const users: User[] = [];
+    for (const c of this.clients.values()) {
+      users.push({ u: c.u, name: c.name, color: c.color, cell: c.cell });
+    }
+    return users;
+  }
+
   // ── Accessors for testing ──
 
   getVersion(): number { return this.version; }
   getRaw(): Map<CellId, string> { return this.raw; }
   getClientCount(): number { return this.clients.size; }
+  getSessionCount(): number { return this.sessions.size; }
+  getUserList_test(): User[] { return this.getUserList(); }
 }
 
 // ── Validation ──
@@ -217,7 +326,6 @@ export function validateEdits(edits: Edit[]): string | null {
 }
 
 function isCellInBounds(cell: CellId): boolean {
-  // Parse column letters and row number
   let col = 0;
   let i = 0;
   while (i < cell.length && cell[i]! >= 'A' && cell[i]! <= 'Z') {

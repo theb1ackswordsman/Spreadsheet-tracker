@@ -22,8 +22,8 @@ import type { CellId, Edit } from '../engine/types';
 export type Op = { v: number; u: string; opId: number; edits: Edit[] };
 export type User = { u: string; name: string; color: string; cell: CellId | null };
 export type C2S =
-  | { t: 'JOIN'; sheetId: string; name: string }
-  | { t: 'RESUME'; sheetId: string; name: string; lastVersion: number }
+  | { t: 'JOIN'; sheetId: string; name: string; cid: string }
+  | { t: 'RESUME'; sheetId: string; name: string; lastVersion: number; cid: string }
   | { t: 'EDIT'; opId: number; edits: Edit[] }
   | { t: 'SELECT'; cell: CellId | null };
 export type S2C =
@@ -33,6 +33,7 @@ export type S2C =
   | { t: 'PRESENCE'; users: User[] }
   | { t: 'ERROR'; msg: string };
 ```
+`cid` is a random 128-bit id the client generates once per tab and keeps in memory. The server uses it as a dedupe key to reuse `u` and `lastOpId` across reconnects within 5 minutes. It is never an identity shown to others.
 
 ## Engine
 Constants (`src/engine/constants.ts`): COLS=26, ROWS=1000, MAX_RANGE=10000, MAX_FORMULA=1000, MAX_DEPTH=64.

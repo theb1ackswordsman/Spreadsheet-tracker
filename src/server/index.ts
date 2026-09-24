@@ -10,9 +10,25 @@ const server = http.createServer((_req, res) => {
 
 const wss = new WebSocketServer({ server, path: '/ws' });
 
+// Ping interval for liveness
+const PING_INTERVAL = 15_000;
+
 wss.on('connection', (ws) => {
   let client: Client | null = null;
   let room: ReturnType<typeof getRoom> | null = null;
+  let alive = true;
+  let clientCid: string | undefined;
+
+  ws.on('pong', () => { alive = true; });
+
+  const pingTimer = setInterval(() => {
+    if (!alive) {
+      ws.terminate();
+      return;
+    }
+    alive = false;
+    ws.ping();
+  }, PING_INTERVAL);
 
   ws.on('message', (data) => {
     const str = typeof data === 'string' ? data : data.toString('utf8');
@@ -29,7 +45,8 @@ wss.on('connection', (ws) => {
       if (msg.t === 'JOIN' || msg.t === 'RESUME') {
         const sheetId = msg.sheetId || 'main';
         room = getRoom(sheetId);
-        client = room.addClient(ws, msg.name);
+        clientCid = msg.cid;
+        client = room.addClient(ws, msg.name, msg.cid);
         room.handleMessage(client, str);
       } else {
         ws.send(JSON.stringify({ t: 'ERROR', msg: 'must JOIN first' }));
@@ -41,8 +58,9 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    clearInterval(pingTimer);
     if (client && room) {
-      room.removeClient(client.u);
+      room.removeClient(client.u, clientCid);
     }
   });
 });
