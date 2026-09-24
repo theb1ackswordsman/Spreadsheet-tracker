@@ -6,7 +6,23 @@ import type { CellId, Result, PatchCell, Stats } from '../engine/types';
 export type StoreMeta = {
   stats: Stats | null;
   version: number;
+  renderCount: number;
 };
+
+// ── Dev render counter (set from Cell.tsx) ──
+let devRenderCount = 0;
+
+export function bumpRenderCount(): void {
+  devRenderCount++;
+}
+
+export function getDevRenderCount(): number {
+  return devRenderCount;
+}
+
+export function resetDevRenderCount(): void {
+  devRenderCount = 0;
+}
 
 // ── State ──
 
@@ -22,7 +38,7 @@ const subs: Map<CellId, Set<() => void>> = new Map();
 /** Meta subscribers */
 const metaSubs: Set<() => void> = new Set();
 
-let meta: StoreMeta = { stats: null, version: 0 };
+let meta: StoreMeta = { stats: null, version: 0, renderCount: 0 };
 
 const EMPTY: Result = Object.freeze({ v: null, e: null });
 
@@ -65,7 +81,7 @@ function flushPatch(): void {
 // ── Public API ──
 
 export function applyPatch(cells: PatchCell[], stats: Stats): void {
-  meta = { stats, version: meta.version + 1 };
+  meta = { stats, version: meta.version + 1, renderCount: devRenderCount };
 
   if (!pendingPatch) {
     pendingPatch = cells;

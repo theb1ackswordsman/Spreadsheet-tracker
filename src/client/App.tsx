@@ -1,4 +1,5 @@
 import React from 'react';
+import { Grid } from './Grid';
 
 export function App() {
   return (
@@ -7,11 +8,11 @@ export function App() {
         background: 'var(--bg)',
         color: 'var(--text)',
         fontFamily: 'var(--font-ui)',
-        minHeight: '100vh',
-        padding: 'var(--space-4)',
+        height: '100vh',
+        overflow: 'hidden',
       }}
     >
-      <h1>Collaborative Spreadsheet</h1>
+      <Grid />
     </div>
   );
 }
