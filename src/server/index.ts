@@ -6,6 +6,19 @@ import { cellsHash } from '../shared/hash';
 import fs from 'node:fs';
 import path from 'node:path';
 
+// ── MIME types for static serving ──
+
+const MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html',
+  '.js': 'application/javascript',
+  '.css': 'text/css',
+  '.svg': 'image/svg+xml',
+  '.json': 'application/json',
+  '.woff2': 'font/woff2',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon',
+};
+
 // ── Token bucket rate limiter per socket ──
 
 interface Bucket {
@@ -110,6 +123,7 @@ function saveState(dataDir: string, v: number, cells: Map<string, string>): void
 export interface ServerOptions {
   port?: number;
   persist?: boolean;
+  serveStatic?: boolean;
 }
 
 export interface ServerHandle {
@@ -120,8 +134,10 @@ export interface ServerHandle {
 
 export function startServer(opts: ServerOptions = {}): ServerHandle {
   const persist = opts.persist ?? false;
+  const serveStatic = opts.serveStatic ?? false;
   const requestedPort = opts.port ?? 0;
   const dataDir = path.resolve('data');
+  const distRoot = serveStatic ? path.resolve('dist') : null;
 
   const room = new Room('main');
 
@@ -133,7 +149,7 @@ export function startServer(opts: ServerOptions = {}): ServerHandle {
     }
   }
 
-  // HTTP server with /debug/hash
+  // HTTP server with /debug/hash + optional static serving
   const httpServer = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/debug/hash') {
       const v = room.getVersion();
@@ -142,6 +158,50 @@ export function startServer(opts: ServerOptions = {}): ServerHandle {
       res.end(JSON.stringify({ v, hash }));
       return;
     }
+
+    // Static file serving when enabled
+    if (distRoot && req.method === 'GET') {
+      const rawUrl = (req.url ?? '/').split('?')[0] ?? '/';
+      const decoded = decodeURIComponent(rawUrl);
+      const resolved = path.resolve(distRoot, '.' + decoded);
+
+      // Path traversal protection
+      if (!resolved.startsWith(distRoot + path.sep) && resolved !== distRoot) {
+        res.writeHead(403, { 'Content-Type': 'text/plain' });
+        res.end('Forbidden');
+        return;
+      }
+
+      const ext = path.extname(resolved);
+
+      // Try serving the resolved file
+      if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+        const mime = MIME_TYPES[ext] ?? 'application/octet-stream';
+        res.writeHead(200, { 'Content-Type': mime });
+        fs.createReadStream(resolved).pipe(res);
+        return;
+      }
+
+      // 404 for missing files with an extension (known asset)
+      if (ext) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not found');
+        return;
+      }
+
+      // SPA fallback: serve index.html for paths without extension
+      const indexPath = path.join(distRoot, 'index.html');
+      if (fs.existsSync(indexPath)) {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        fs.createReadStream(indexPath).pipe(res);
+        return;
+      }
+
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not found');
+      return;
+    }
+
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('OK');
   });
@@ -286,6 +346,7 @@ const isMain = typeof process !== 'undefined' && process.argv[1] && (
 
 if (isMain && process.env['NODE_ENV'] !== 'test' && !process.env['SPREADSHEET_LIB']) {
   const PORT = parseInt(process.env['PORT'] || '8787', 10);
-  const handle = startServer({ port: PORT, persist: true });
-  console.log(`Server listening on port ${handle.port}`);
+  const useStatic = process.argv.includes('-static');
+  const handle = startServer({ port: PORT, persist: true, serveStatic: useStatic });
+  console.log(`Server listening on http://localhost:${handle.port}`);
 }
