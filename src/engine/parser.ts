@@ -47,11 +47,13 @@ class Parser {
   private tokens: Token[];
   private pos: number;
   private failed: boolean;
+  private depth: number;
 
   constructor(tokens: Token[]) {
     this.tokens = tokens;
     this.pos = 0;
     this.failed = false;
+    this.depth = 0;
   }
 
   private peek(): Token {
@@ -132,7 +134,10 @@ class Parser {
     }
     if (tok.kind === 'LPAREN') {
       this.advance();
+      this.depth++;
+      if (this.depth > MAX_DEPTH) { this.failed = true; return null; }
       const inner = this.expr(0);
+      this.depth--;
       if (inner === null) return null;
       if (this.expect('RPAREN') === null) return null;
       return inner;

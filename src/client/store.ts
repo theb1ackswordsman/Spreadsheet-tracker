@@ -229,6 +229,14 @@ export function getRaw(id: CellId): string {
   return rawMirror.get(id) ?? '';
 }
 
+export function getRawMirrorEntries(): [CellId, string][] {
+  const entries: [CellId, string][] = [];
+  for (const [id, raw] of rawMirror) {
+    entries.push([id, raw]);
+  }
+  return entries;
+}
+
 export function getCell(id: CellId): Result {
   return values.get(id) ?? EMPTY;
 }

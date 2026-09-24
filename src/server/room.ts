@@ -57,6 +57,15 @@ export class Room {
     this.sheetId = sheetId;
   }
 
+  /** Load persisted state (version + raw cells) */
+  loadState(v: number, cells: [string, string][]): void {
+    this.version = v;
+    this.raw.clear();
+    for (const [id, raw] of cells) {
+      this.raw.set(id, raw);
+    }
+  }
+
   // ── Client management ──
 
   addClient(ws: WebSocket, name: string, cid: string | undefined): Client {
@@ -101,7 +110,12 @@ export class Room {
     return client;
   }
 
-  removeClient(u: string, cid: string | undefined): void {
+  removeClient(u: string, cid: string | undefined, ws?: WebSocket): void {
+    const existing = this.clients.get(u);
+    if (ws && existing && existing.ws !== ws) {
+      // A new connection for this session already took over; do not remove it
+      return;
+    }
     this.clients.delete(u);
     // Schedule session expiry
     if (cid) {
@@ -162,23 +176,30 @@ export class Room {
       return;
     }
 
-    const oldestV = this.opLogStart;
-    if (lastVersion >= oldestV - 1 && lastVersion < this.version) {
-      // Can send incremental OPS
-      const startIdx = lastVersion - this.opLogStart;
-      const ops = this.opLog.slice(Math.max(0, startIdx));
-      const filtered = ops.filter(op => op.v > lastVersion);
-      if (filtered.length > 0) {
-        this.sendTo(client, { t: 'OPS', ops: filtered });
-        this.scheduleBroadcastPresence();
-        return;
-      }
-    }
+    // Already caught up
     if (lastVersion === this.version) {
       this.sendTo(client, { t: 'OPS', ops: [] });
       this.scheduleBroadcastPresence();
       return;
     }
+
+    // Need versions lastVersion+1 through this.version.
+    // opLog contains ops starting at version this.opLogStart.
+    // We can serve delta only if the log covers EVERY required version.
+    const neededFrom = lastVersion + 1;
+    if (this.opLog.length > 0 && this.opLogStart <= neededFrom) {
+      const startIdx = neededFrom - this.opLogStart;
+      if (startIdx >= 0 && startIdx < this.opLog.length) {
+        const ops = this.opLog.slice(startIdx);
+        // Verify contiguous coverage
+        if (ops.length === this.version - lastVersion && ops[0]!.v === neededFrom) {
+          this.sendTo(client, { t: 'OPS', ops });
+          this.scheduleBroadcastPresence();
+          return;
+        }
+      }
+    }
+
     // Otherwise full snapshot
     this.sendSnapshot(client);
     this.scheduleBroadcastPresence();
@@ -337,8 +358,9 @@ function isCellInBounds(cell: CellId): boolean {
 }
 
 function sanitizeName(name: string): string {
-  const trimmed = String(name).trim().slice(0, 24);
-  return trimmed || 'Anon';
+  const stripped = String(name).replace(/[\x00-\x1f\x7f]/g, '');
+  const trimmed = stripped.trim().slice(0, 24);
+  return trimmed || 'Guest';
 }
 
 // ── Room registry ──

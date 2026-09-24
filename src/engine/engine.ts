@@ -63,7 +63,6 @@ export class Engine {
 
     if (raw === '') {
       this.raws.delete(id);
-      this.results.delete(id);
       // unlink already done above
     } else {
       this.raws.set(id, raw);
@@ -72,9 +71,6 @@ export class Engine {
         if (pr.ok) {
           const refs = refsOf(pr.node);
           this.link(id, pr.node, refs);
-        } else {
-          // bad parse: store as #VALUE!, no deps
-          this.results.set(id, { v: null, e: '#VALUE!' });
         }
       }
     }
@@ -252,6 +248,9 @@ export class Engine {
         const raw = this.raws.get(id);
         if (raw === undefined) {
           this.results.delete(id);
+        } else if (raw.startsWith('=')) {
+          // Formula that failed to parse — error is #VALUE!
+          this.results.set(id, { v: null, e: '#VALUE!' });
         } else {
           this.results.set(id, parseRaw(raw));
         }
