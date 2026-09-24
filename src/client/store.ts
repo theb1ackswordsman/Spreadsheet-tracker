@@ -421,3 +421,54 @@ export function useMeta(): StoreMeta {
     () => getMeta(),
   );
 }
+
+// ── Sheet reset (for route change / sign-out) ──
+
+export function resetForSheet(): void {
+  // Clear all cell data
+  const oldKeys = new Set(rawMirror.keys());
+  for (const id of oldKeys) {
+    rawMirror.delete(id);
+    const cellSubs = subs.get(id);
+    if (cellSubs) {
+      for (const cb of cellSubs) cb();
+    }
+  }
+  values.clear();
+
+  // Clear pending patch
+  if (rafId) {
+    cancelAnimationFrame(rafId);
+    rafId = 0;
+  }
+  pendingPatch = null;
+
+  // Clear presence
+  const oldPresenceCells = new Set(presenceByCell.keys());
+  presenceByCell.clear();
+  for (const cellId of oldPresenceCells) {
+    const cellPresenceSubs = presenceSubs.get(cellId);
+    if (cellPresenceSubs) {
+      for (const cb of cellPresenceSubs) cb();
+    }
+  }
+
+  // Clear recent edits
+  recentEdits.clear();
+
+  // Reset meta
+  smoothedRtt = null;
+  firstSnapshotReceived = false;
+  meta = {
+    stats: null,
+    version: 0,
+    renderCount: 0,
+    users: [],
+    connection: 'reconnecting',
+    pendingCount: 0,
+    toasts: [],
+    rtt: null,
+    evalMode: meta.evalMode, // preserve eval mode
+  };
+  notifyMeta();
+}

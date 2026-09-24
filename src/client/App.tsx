@@ -13,7 +13,7 @@ import type { Stats } from '../engine/types';
 // ── Debug flag ──
 const isDebug = typeof window !== 'undefined' && window.location.search.includes('debug');
 
-export function App() {
+export function App({ accountMenu }: { accountMenu?: React.ReactNode } = {}) {
   const [title, setTitle] = useState('Untitled spreadsheet');
   const [nav, setNav] = useState<NavState>({ col: 0, row: 0, mode: 'navigate' });
   const [editBuffer, setEditBuffer] = useState('');
@@ -118,6 +118,7 @@ export function App() {
         onTitleChange={setTitle}
         connection={meta.connection}
         users={meta.users}
+        accountMenu={accountMenu}
       />
       {meta.connection === 'reconnecting' && (
         <ReconnectingBanner pendingCount={meta.pendingCount} />
@@ -192,11 +193,13 @@ function TopBar({
   onTitleChange,
   connection,
   users,
+  accountMenu,
 }: {
   title: string;
   onTitleChange: (t: string) => void;
   connection: 'connected' | 'reconnecting';
   users: User[];
+  accountMenu?: React.ReactNode;
 }) {
   const myU = getMyU();
 
@@ -280,6 +283,7 @@ function TopBar({
       >
         Share
       </button>
+      {accountMenu}
     </div>
   );
 }

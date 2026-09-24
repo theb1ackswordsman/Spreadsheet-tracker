@@ -1,10 +1,10 @@
 import type { C2S, S2C, Op, User } from '../shared/protocol';
 import type { CellId, Edit } from '../engine/types';
-import { init as bridgeInit, apply as bridgeApply } from './bridge';
+import { init as bridgeInit, apply as bridgeApply, resetWorker } from './bridge';
 import {
   replaceRawMirror, setConnection, setPendingCount, setUsers,
   setServerVersion, addToast, markRecentEdit, wasRecentlyEdited,
-  recordRtt, getEvalMode,
+  recordRtt, getEvalMode, resetForSheet as storeResetForSheet,
 } from './store';
 
 // ── State ──
@@ -31,6 +31,12 @@ let currentSelection: CellId | null = null;
 
 // User list cache for name lookups
 let usersByU: Map<string, User> = new Map();
+
+// Current sheetId for JOIN/RESUME
+let currentSheetId = 'main';
+
+// Whether auto-connect is enabled
+let autoConnectEnabled = false;
 
 // ── Random name ──
 
@@ -76,9 +82,9 @@ function connect(): void {
 
     // JOIN or RESUME
     if (lastServerVersion > 0) {
-      send({ t: 'RESUME', sheetId: 'main', name: userName, lastVersion: lastServerVersion, cid });
+      send({ t: 'RESUME', sheetId: currentSheetId, name: userName, lastVersion: lastServerVersion, cid });
     } else {
-      send({ t: 'JOIN', sheetId: 'main', name: userName, cid });
+      send({ t: 'JOIN', sheetId: currentSheetId, name: userName, cid });
     }
   };
 
@@ -91,7 +97,9 @@ function connect(): void {
     ws = null;
     connected = false;
     setConnection('reconnecting');
-    scheduleReconnect();
+    if (autoConnectEnabled) {
+      scheduleReconnect();
+    }
   };
 
   ws.onerror = () => {
@@ -253,7 +261,71 @@ export function dropConnection(): void {
   }
 }
 
-// ── Auto-connect on module load (browser only) ──
-if (typeof window !== 'undefined' && typeof WebSocket !== 'undefined') {
+export function getPendingOpCount(): number {
+  return pending.size;
+}
+
+/**
+ * Reset for a new sheet: close socket, clear store/bridge state, reconnect with new sheetId.
+ * Called on route change or sign-out.
+ */
+export function resetForSheet(sheetId?: string): void {
+  // Close existing connection
+  autoConnectEnabled = false;
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  if (ws) {
+    ws.onclose = null;
+    ws.onerror = null;
+    ws.close();
+    ws = null;
+  }
+  connected = false;
+
+  // Clear socket state
+  pending.clear();
+  setPendingCount(0);
+  editTimestamps.clear();
+  nextOpId = 1;
+  lastServerVersion = 0;
+  myU = null;
+  myName = null;
+  currentSelection = null;
+  usersByU = new Map();
+  backoff = 250;
+
+  // Clear store and bridge
+  storeResetForSheet();
+  resetWorker();
+
+  // Set new sheetId and reconnect if provided
+  if (sheetId) {
+    currentSheetId = sheetId;
+    autoConnectEnabled = true;
+    connect();
+  }
+}
+
+/** Start connecting (called once from boot) */
+export function startSocket(sheetId: string): void {
+  currentSheetId = sheetId;
+  autoConnectEnabled = true;
   connect();
+}
+
+/** Disconnect without reconnect (for sign-out / leaving sheet) */
+export function disconnectSocket(): void {
+  autoConnectEnabled = false;
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  if (ws) {
+    ws.onclose = null;
+    ws.close();
+    ws = null;
+  }
+  connected = false;
 }

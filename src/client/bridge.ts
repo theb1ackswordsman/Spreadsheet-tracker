@@ -103,3 +103,8 @@ export function apply(edits: Edit[], mode: Mode = currentMode): void {
   }
   postToWorker({ t: 'APPLY', edits, mode });
 }
+
+/** Reset worker with empty cells (for sheet switch) */
+export function resetWorker(): void {
+  postToWorker({ t: 'INIT', cells: [] });
+}
