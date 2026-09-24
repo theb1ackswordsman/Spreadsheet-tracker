@@ -49,6 +49,16 @@ const userName = randomName();
 // ── Connect ──
 
 function getUrl(): string {
+  const envUrl = import.meta.env?.['VITE_WS_URL'];
+  if (envUrl) {
+    if (envUrl.startsWith('ws://') || envUrl.startsWith('wss://')) {
+      return envUrl.endsWith('/ws') ? envUrl : `${envUrl}/ws`;
+    }
+    const proto = (typeof location !== 'undefined' && location.protocol === 'https:') ? 'wss' : 'ws';
+    const cleanHost = envUrl.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+    return `${proto}://${cleanHost}${cleanHost.endsWith('/ws') ? '' : '/ws'}`;
+  }
+
   if (typeof location === 'undefined') return 'ws://localhost:8787/ws';
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   return `${proto}://${location.host}/ws`;
