@@ -1,11 +1,15 @@
 import React from 'react';
-import { useCell, usePresence, bumpRenderCount, getDevRenderCount, resetDevRenderCount } from './store';
+import {
+  useCell, usePresence, bumpRenderCount,
+  getRenderCount, resetRenderCount,
+  getDevRenderCount, resetDevRenderCount,
+} from './store';
 import { getMyU } from './socket';
 import type { CellId } from '../engine/types';
 import type { User } from '../shared/protocol';
 
 // Re-export for Grid to use
-export { getDevRenderCount, resetDevRenderCount };
+export { getRenderCount, resetRenderCount, getDevRenderCount, resetDevRenderCount };
 
 // ── Cell component ──
 
@@ -22,9 +26,7 @@ interface CellProps {
 }
 
 export const Cell = React.memo(function Cell({ id, col, row, active, onClick, onDoubleClick }: CellProps) {
-  if (import.meta.env.DEV) {
-    bumpRenderCount();
-  }
+  bumpRenderCount();
 
   const result = useCell(id);
   const presence = usePresence(id);

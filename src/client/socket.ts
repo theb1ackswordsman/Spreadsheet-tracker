@@ -4,6 +4,7 @@ import { init as bridgeInit, apply as bridgeApply } from './bridge';
 import {
   replaceRawMirror, setConnection, setPendingCount, setUsers,
   setServerVersion, addToast, markRecentEdit, wasRecentlyEdited,
+  recordRtt, getEvalMode,
 } from './store';
 
 // ── State ──
@@ -19,6 +20,7 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Pending ops awaiting echo
 const pending: Map<number, Edit[]> = new Map();
+const editTimestamps: Map<number, number> = new Map();
 let nextOpId = 1;
 
 // Client tab id – 128-bit random, generated once per tab, kept in memory
@@ -47,6 +49,7 @@ const userName = randomName();
 // ── Connect ──
 
 function getUrl(): string {
+  if (typeof location === 'undefined') return 'ws://localhost:8787/ws';
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   return `${proto}://${location.host}/ws`;
 }
@@ -175,15 +178,21 @@ function applyOp(op: Op): void {
   if (op.u === myU) {
     pending.delete(op.opId);
     setPendingCount(pending.size);
+    const sentAt = editTimestamps.get(op.opId);
+    if (sentAt !== undefined) {
+      editTimestamps.delete(op.opId);
+      recordRtt(performance.now() - sentAt);
+    }
   }
 
   // Apply edits through bridge (which updates raw mirror + worker)
   // Idempotent: setRawMirror is no-op if raw unchanged (own echo)
-  bridgeApply(op.edits);
+  bridgeApply(op.edits, getEvalMode());
 }
 
 function resendPending(): void {
   for (const [opId, edits] of pending) {
+    editTimestamps.set(opId, performance.now());
     send({ t: 'EDIT', opId, edits });
   }
 }
@@ -203,6 +212,7 @@ export function sendEdit(edits: Edit[]): void {
   const opId = nextOpId++;
   pending.set(opId, edits);
   setPendingCount(pending.size);
+  editTimestamps.set(opId, performance.now());
   // Mark cells as recently edited for overwrite toast
   for (const edit of edits) {
     markRecentEdit(edit.cell);
@@ -233,5 +243,7 @@ export function dropConnection(): void {
   }
 }
 
-// ── Auto-connect on module load ──
-connect();
+// ── Auto-connect on module load (browser only) ──
+if (typeof window !== 'undefined' && typeof WebSocket !== 'undefined') {
+  connect();
+}

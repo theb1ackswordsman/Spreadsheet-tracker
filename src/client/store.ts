@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import type { CellId, Result, PatchCell, Stats } from '../engine/types';
+import type { CellId, Result, PatchCell, Stats, Mode } from '../engine/types';
 import type { User } from '../shared/protocol';
 
 // ── Types ──
@@ -18,22 +18,28 @@ export type StoreMeta = {
   connection: 'connected' | 'reconnecting';
   pendingCount: number;
   toasts: Toast[];
+  rtt: number | null;
+  evalMode: Mode;
 };
 
-// ── Dev render counter (set from Cell.tsx) ──
-let devRenderCount = 0;
+// ── Render counter (set from Cell.tsx) ──
+let totalRenderCount = 0;
 
 export function bumpRenderCount(): void {
-  devRenderCount++;
+  totalRenderCount++;
 }
 
-export function getDevRenderCount(): number {
-  return devRenderCount;
+export function getRenderCount(): number {
+  return totalRenderCount;
 }
 
-export function resetDevRenderCount(): void {
-  devRenderCount = 0;
+export function resetRenderCount(): void {
+  totalRenderCount = 0;
 }
+
+export const bumpDevRenderCount = bumpRenderCount;
+export const getDevRenderCount = getRenderCount;
+export const resetDevRenderCount = resetRenderCount;
 
 // ── State ──
 
@@ -63,6 +69,8 @@ let meta: StoreMeta = {
   connection: 'reconnecting',
   pendingCount: 0,
   toasts: [],
+  rtt: null,
+  evalMode: 'inc',
 };
 
 const EMPTY: Result = Object.freeze({ v: null, e: null });
@@ -124,6 +132,7 @@ function flushPatch(): void {
   if (!cells) return;
   pendingPatch = null;
 
+  const rendersBefore = totalRenderCount;
   let metaChanged = false;
 
   for (const [id, v, e] of cells) {
@@ -144,6 +153,19 @@ function flushPatch(): void {
     }
   }
 
+  // Measure rendered cells after subscriber callbacks trigger React renders
+  const measureRenders = () => {
+    const rendered = totalRenderCount - rendersBefore;
+    if (meta.renderCount !== rendered) {
+      meta = { ...meta, renderCount: rendered };
+      notifyMeta();
+    }
+  };
+
+  if (typeof window !== 'undefined' && typeof requestAnimationFrame !== 'undefined') {
+    setTimeout(measureRenders, 0);
+  }
+
   if (metaChanged) {
     notifyMeta();
   }
@@ -155,10 +177,50 @@ function notifyMeta(): void {
   for (const cb of metaSubs) cb();
 }
 
+// ── RTT tracking ──
+
+let smoothedRtt: number | null = null;
+const RTT_ALPHA = 0.2; // exponential moving average factor
+
+export function recordRtt(sample: number): void {
+  if (smoothedRtt === null) {
+    smoothedRtt = sample;
+  } else {
+    smoothedRtt = RTT_ALPHA * sample + (1 - RTT_ALPHA) * smoothedRtt;
+  }
+  meta = { ...meta, rtt: smoothedRtt };
+  notifyMeta();
+}
+
+export function getRtt(): number | null {
+  return smoothedRtt;
+}
+
+// ── Eval mode (Incremental | Naive) ──
+
+type EvalModeListener = (mode: Mode) => void;
+const evalModeListeners: Set<EvalModeListener> = new Set();
+
+export function onEvalModeChange(cb: EvalModeListener): () => void {
+  evalModeListeners.add(cb);
+  return () => evalModeListeners.delete(cb);
+}
+
+export function setEvalMode(mode: Mode): void {
+  if (meta.evalMode === mode) return;
+  meta = { ...meta, evalMode: mode };
+  for (const cb of evalModeListeners) cb(mode);
+  notifyMeta();
+}
+
+export function getEvalMode(): Mode {
+  return meta.evalMode;
+}
+
 // ── Public API ──
 
 export function applyPatch(cells: PatchCell[], stats: Stats): void {
-  meta = { ...meta, stats, version: meta.version + 1, renderCount: devRenderCount };
+  meta = { ...meta, stats, version: meta.version + 1 };
 
   if (!pendingPatch) {
     pendingPatch = cells;

@@ -1,13 +1,29 @@
 import type { CellId, Edit, Mode, FromWorker } from '../engine/types';
-import { applyPatch, setRawMirror, getRawMirrorEntries } from './store';
+import { applyPatch, setRawMirror, getRawMirrorEntries, onEvalModeChange } from './store';
 
 // ── Watchdog timeout ──
 
 const WATCHDOG_TIMEOUT = 2000;
 
+// ── Mode tracking ──
+
+let currentMode: Mode = 'inc';
+
+onEvalModeChange((m) => {
+  currentMode = m;
+});
+
+export function setEvalMode(mode: Mode): void {
+  currentMode = mode;
+}
+
+export function getEvalMode(): Mode {
+  return currentMode;
+}
+
 // ── Module-level singleton worker ──
 
-let worker: Worker;
+let worker: Worker | null = null;
 let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingAt: number | null = null; // timestamp of the oldest unanswered message
 
@@ -38,7 +54,7 @@ function createWorker(): Worker {
 
 function respawnWorker(): void {
   console.warn('[bridge] watchdog: worker timed out, respawning');
-  worker.terminate();
+  worker?.terminate();
   pendingAt = null;
   if (watchdogTimer !== null) {
     clearTimeout(watchdogTimer);
@@ -63,13 +79,16 @@ function startWatchdog(): void {
 }
 
 function postToWorker(msg: { t: 'INIT'; cells: [CellId, string][] } | { t: 'APPLY'; edits: Edit[]; mode: Mode }): void {
+  if (typeof Worker === 'undefined') return;
   if (pendingAt === null) {
     startWatchdog();
   }
-  worker.postMessage(msg);
+  worker?.postMessage(msg);
 }
 
-worker = createWorker();
+if (typeof Worker !== 'undefined') {
+  worker = createWorker();
+}
 
 // ── Public API ──
 
@@ -77,7 +96,7 @@ export function init(cells: [CellId, string][]): void {
   postToWorker({ t: 'INIT', cells });
 }
 
-export function apply(edits: Edit[], mode: Mode = 'inc'): void {
+export function apply(edits: Edit[], mode: Mode = currentMode): void {
   // Update raw mirror optimistically
   for (const edit of edits) {
     setRawMirror(edit.cell, edit.raw);

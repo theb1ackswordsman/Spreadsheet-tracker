@@ -2,9 +2,11 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Grid, type GridHandle } from './Grid';
 import { FormulaBar } from './FormulaBar';
 import { toCellId, type NavState } from './nav';
-import { useMeta, addToast } from './store';
+import { useMeta, addToast, setEvalMode } from './store';
 import { sendSelect, getMyU, dropConnection } from './socket';
 import { sendSampleData } from './sample';
+import { isStressLoaded, sendStressData, clearStressData } from './stress';
+import { PerformanceStrip } from './PerformanceStrip';
 import type { User } from '../shared/protocol';
 import type { Stats } from '../engine/types';
 
@@ -17,6 +19,23 @@ export function App() {
   const [editBuffer, setEditBuffer] = useState('');
   const [hintDismissed, setHintDismissed] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [perfOpen, setPerfOpen] = useState(false);
+  const [stressBusy, setStressBusy] = useState(false);
+  const stressLoaded = isStressLoaded();
+
+  const handleStressClick = async () => {
+    if (stressBusy) return;
+    setStressBusy(true);
+    try {
+      if (stressLoaded) {
+        await clearStressData();
+      } else {
+        await sendStressData();
+      }
+    } finally {
+      setStressBusy(false);
+    }
+  };
 
   const gridRef = useRef<GridHandle>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -116,6 +135,11 @@ export function App() {
       )}
       <Toolbar
         onSampleData={sendSampleData}
+        isStressLoaded={stressLoaded}
+        onStressClick={handleStressClick}
+        stressBusy={stressBusy}
+        perfOpen={perfOpen}
+        onTogglePerformance={() => setPerfOpen(p => !p)}
         onToggleShortcuts={() => setShortcutsOpen(prev => !prev)}
       />
       {!hintDismissed && (
@@ -132,10 +156,20 @@ export function App() {
         onNavChange={handleNavChange}
         onOpenShortcuts={() => setShortcutsOpen(true)}
       />
+      {perfOpen && (
+        <PerformanceStrip
+          stats={meta.stats}
+          meta={meta}
+          evalMode={meta.evalMode}
+          onModeChange={setEvalMode}
+        />
+      )}
       <StatusBar
         usersCount={meta.users.length}
         version={meta.version}
         stats={meta.stats}
+        perfOpen={perfOpen}
+        onTogglePerformance={() => setPerfOpen(p => !p)}
       />
       {shortcutsOpen && (
         <ShortcutsPopover
@@ -299,9 +333,19 @@ function ReconnectingBanner({ pendingCount }: { pendingCount: number }) {
 
 function Toolbar({
   onSampleData,
+  isStressLoaded,
+  onStressClick,
+  stressBusy,
+  perfOpen,
+  onTogglePerformance,
   onToggleShortcuts,
 }: {
   onSampleData: () => void;
+  isStressLoaded: boolean;
+  onStressClick: () => void;
+  stressBusy: boolean;
+  perfOpen: boolean;
+  onTogglePerformance: () => void;
   onToggleShortcuts: () => void;
 }) {
   return (
@@ -319,10 +363,30 @@ function Toolbar({
     >
       <button
         type="button"
+        id="btn-sample-data"
         className="btn-text"
         onClick={onSampleData}
       >
         Sample data
+      </button>
+      <button
+        type="button"
+        id="btn-stress-test"
+        className="btn-text"
+        onClick={onStressClick}
+        disabled={stressBusy}
+        style={isStressLoaded ? { color: 'var(--accent)' } : undefined}
+      >
+        {isStressLoaded ? 'Clear stress data' : 'Stress test'}
+      </button>
+      <button
+        type="button"
+        id="btn-performance"
+        className="btn-text"
+        onClick={onTogglePerformance}
+        style={perfOpen ? { background: 'var(--accent-weak)', color: 'var(--accent)', fontWeight: 600 } : undefined}
+      >
+        Performance
       </button>
       <button
         type="button"
@@ -372,10 +436,14 @@ function StatusBar({
   usersCount,
   version,
   stats,
+  perfOpen,
+  onTogglePerformance,
 }: {
   usersCount: number;
   version: number;
   stats: Stats | null;
+  perfOpen: boolean;
+  onTogglePerformance: () => void;
 }) {
   const recalcText = stats
     ? `${stats.scope} of ${stats.populated.toLocaleString()} cells, ${stats.ms.toFixed(1)} ms`
@@ -400,6 +468,21 @@ function StatusBar({
       <div>{usersCount} {usersCount === 1 ? 'user' : 'users'} online</div>
       <div>v{version}</div>
       <div>{recalcText}</div>
+      <div style={{ flex: 1 }} />
+      <button
+        type="button"
+        id="btn-status-performance"
+        className="btn-text"
+        onClick={onTogglePerformance}
+        style={{
+          fontSize: '12px',
+          padding: '0 6px',
+          color: perfOpen ? 'var(--accent)' : 'var(--muted)',
+          fontWeight: perfOpen ? 600 : 400,
+        }}
+      >
+        Performance
+      </button>
     </div>
   );
 }

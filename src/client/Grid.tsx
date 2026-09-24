@@ -1,6 +1,6 @@
 import React, { useCallback, useRef, useState, useEffect, useImperativeHandle } from 'react';
 import { COLS, ROWS } from '../engine/constants';
-import { Cell, getDevRenderCount, resetDevRenderCount } from './Cell';
+import { Cell, getRenderCount, resetRenderCount, getDevRenderCount, resetDevRenderCount } from './Cell';
 import { Editor } from './Editor';
 import { reduce, initNav, toCellId, colLabel } from './nav';
 import type { NavState, NavAction } from './nav';
@@ -18,14 +18,12 @@ const OVERSCAN = 4;
 const TOTAL_HEIGHT = ROWS * ROW_H;
 const TOTAL_WIDTH = COLS * COL_W;
 
-// ── Expose render counter via store meta (dev only) ──
+// ── Expose render counter via window for testing/inspection ──
 
-if (import.meta.env.DEV) {
-  subscribeMeta(() => {
-    // meta subscriber so dev tools can inspect
-  });
-  // Expose to window for console access
+if (typeof window !== 'undefined') {
   const w = window as unknown as Record<string, unknown>;
+  w['__gridRenderCount'] = getRenderCount;
+  w['__gridRenderReset'] = resetRenderCount;
   w['__gridDevRenderCount'] = getDevRenderCount;
   w['__gridDevRenderReset'] = resetDevRenderCount;
 }
