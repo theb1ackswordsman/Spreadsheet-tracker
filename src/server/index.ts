@@ -5,6 +5,26 @@ import type { C2S } from '../shared/protocol';
 import { cellsHash } from '../shared/hash';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  SessionManager,
+  RateLimiter,
+  parseCookies,
+  getSessionFromRequest,
+  buildSetCookie,
+  buildClearCookie,
+  checkCsrfAndOrigin,
+  isLoopback,
+  readJsonBody,
+  defaultVerifyGoogleCode,
+  type VerifyGoogleCodeFn,
+} from './auth';
+import {
+  SheetManager,
+  roleFor,
+  isValidEmail,
+  validateAcl,
+} from './sheets';
 
 // ── MIME types for static serving ──
 
@@ -68,7 +88,7 @@ function checkOrigin(req: http.IncomingMessage): boolean {
   // ALLOWED_ORIGINS env
   const allowed = process.env['ALLOWED_ORIGINS'];
   if (allowed) {
-    const list = allowed.split(',').map(s => s.trim());
+    const list = allowed.split(',').map((s) => s.trim());
     if (list.includes(originHost)) return true;
   }
 
@@ -84,7 +104,7 @@ function sanitizeName(raw: string): string {
   return trimmed || 'Guest';
 }
 
-// ── Persistence ──
+// ── Persistence for legacy/auth:off ──
 
 const PERSIST_INTERVAL = 5000;
 
@@ -124,34 +144,57 @@ export interface ServerOptions {
   port?: number;
   persist?: boolean;
   serveStatic?: boolean;
+  auth?: 'on' | 'off';
+  verifyGoogleCode?: VerifyGoogleCodeFn;
+  dataDir?: string;
 }
 
 export interface ServerHandle {
   close: () => Promise<void>;
   port: number;
   room: Room;
+  sheetManager?: SheetManager;
+  sessionManager?: SessionManager;
 }
 
 export function startServer(opts: ServerOptions = {}): ServerHandle {
   const persist = opts.persist ?? false;
   const serveStatic = opts.serveStatic ?? false;
+  const authMode = opts.auth ?? 'off';
   const requestedPort = opts.port ?? 0;
-  const dataDir = path.resolve('data');
+  const dataDir = opts.dataDir ? path.resolve(opts.dataDir) : path.resolve('data');
   const distRoot = serveStatic ? path.resolve('dist') : null;
 
+  // Single fallback/legacy room (used in auth: 'off' mode and tests)
   const room = new Room('main');
 
-  // Load persisted state
-  if (persist) {
+  // Managers for auth mode
+  let sessionManager: SessionManager | undefined;
+  let sheetManager: SheetManager | undefined;
+  let authRateLimiter: RateLimiter | undefined;
+  let sheetsRateLimiter: RateLimiter | undefined;
+  const verifyGoogleCode = opts.verifyGoogleCode ?? defaultVerifyGoogleCode;
+  let guestCounter = 0;
+
+  if (authMode === 'on') {
+    sessionManager = new SessionManager(dataDir, persist);
+    sheetManager = new SheetManager(dataDir, persist);
+    authRateLimiter = new RateLimiter(10, 60 * 1000); // 10/min/IP
+    sheetsRateLimiter = new RateLimiter(20, 60 * 60 * 1000); // 20/hr/user
+  } else if (persist) {
+    // Load persisted state for legacy single room
     const state = loadState(dataDir);
     if (state) {
       room.loadState(state.v, state.cells);
     }
   }
 
-  // HTTP server with /debug/hash + optional static serving
-  const httpServer = http.createServer((req, res) => {
-    if (req.method === 'GET' && req.url === '/debug/hash') {
+  // HTTP server
+  const httpServer = http.createServer(async (req, res) => {
+    const rawUrl = (req.url ?? '/').split('?')[0] ?? '/';
+
+    // /debug/hash
+    if (req.method === 'GET' && rawUrl === '/debug/hash') {
       const v = room.getVersion();
       const hash = cellsHash(room.getRaw());
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -159,9 +202,309 @@ export function startServer(opts: ServerOptions = {}): ServerHandle {
       return;
     }
 
+    // Auth & Sheets REST API
+    if (authMode === 'on' && rawUrl.startsWith('/api/')) {
+      // CSRF & Origin checks on non-GET
+      if (req.method !== 'GET') {
+        const csrf = checkCsrfAndOrigin(req);
+        if (!csrf.ok) {
+          res.writeHead(csrf.status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: csrf.error }));
+          return;
+        }
+      }
+
+      // GET /api/config
+      if (req.method === 'GET' && rawUrl === '/api/config') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            googleClientId: process.env['GOOGLE_CLIENT_ID'] || '',
+            devLogin: process.env['ALLOW_DEV_LOGIN'] === '1',
+          })
+        );
+        return;
+      }
+
+      // GET /api/me
+      if (req.method === 'GET' && rawUrl === '/api/me') {
+        const user = getSessionFromRequest(req, sessionManager!);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ user: user ? { email: user.email, name: user.name } : null }));
+        return;
+      }
+
+      // Rate limit for /api/auth/*
+      if (rawUrl.startsWith('/api/auth/')) {
+        const clientIp = req.socket.remoteAddress || 'unknown';
+        if (!authRateLimiter!.isAllowed(clientIp)) {
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'rate_limited' }));
+          return;
+        }
+      }
+
+      // POST /api/auth/google
+      if (req.method === 'POST' && rawUrl === '/api/auth/google') {
+        const bodyRes = await readJsonBody(req);
+        if (!bodyRes.ok) {
+          res.writeHead(bodyRes.status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: bodyRes.error }));
+          return;
+        }
+        const { code } = bodyRes.body ?? {};
+        if (!code || typeof code !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'bad_request' }));
+          return;
+        }
+
+        let verified: { email: string; name: string; email_verified?: boolean } | null = null;
+        try {
+          verified = await verifyGoogleCode(code);
+        } catch {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'invalid_token' }));
+          return;
+        }
+
+        if (!verified || verified.email_verified !== true) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'email_not_verified' }));
+          return;
+        }
+
+        const email = verified.email.toLowerCase().trim();
+        const name = sanitizeName(verified.name || email.split('@')[0] || 'Guest');
+        const sid = sessionManager!.createSession({ email, name });
+        const cookie = buildSetCookie(sid, req);
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Set-Cookie': cookie,
+        });
+        res.end(JSON.stringify({ user: { email, name } }));
+        return;
+      }
+
+      // POST /api/auth/logout
+      if (req.method === 'POST' && rawUrl === '/api/auth/logout') {
+        const cookies = parseCookies(req.headers['cookie']);
+        const sid = cookies['sid'];
+        if (sid) {
+          sessionManager!.deleteSession(sid);
+        }
+        const cookie = buildClearCookie(req);
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Set-Cookie': cookie,
+        });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      // POST /api/auth/dev
+      if (req.method === 'POST' && rawUrl === '/api/auth/dev') {
+        if (process.env['ALLOW_DEV_LOGIN'] !== '1' || !isLoopback(req.socket.remoteAddress)) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'forbidden' }));
+          return;
+        }
+        const bodyRes = await readJsonBody(req);
+        if (!bodyRes.ok) {
+          res.writeHead(bodyRes.status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: bodyRes.error }));
+          return;
+        }
+        const { email, name: rawName } = bodyRes.body ?? {};
+        if (!isValidEmail(email)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'bad_request' }));
+          return;
+        }
+        const cleanEmail = email.toLowerCase().trim();
+        const cleanName = sanitizeName(rawName || cleanEmail.split('@')[0]);
+        const sid = sessionManager!.createSession({ email: cleanEmail, name: cleanName });
+        const cookie = buildSetCookie(sid, req);
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Set-Cookie': cookie,
+        });
+        res.end(JSON.stringify({ user: { email: cleanEmail, name: cleanName } }));
+        return;
+      }
+
+      // POST /api/sheets
+      if (req.method === 'POST' && rawUrl === '/api/sheets') {
+        const user = getSessionFromRequest(req, sessionManager!);
+        if (!user) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'signin_required' }));
+          return;
+        }
+        if (!sheetsRateLimiter!.isAllowed(user.email.toLowerCase())) {
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'rate_limited' }));
+          return;
+        }
+        const meta = sheetManager!.createSheet(user.email);
+        res.writeHead(201, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: meta.id }));
+        return;
+      }
+
+      // GET /api/sheets
+      if (req.method === 'GET' && rawUrl === '/api/sheets') {
+        const user = getSessionFromRequest(req, sessionManager!);
+        if (!user) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'signin_required' }));
+          return;
+        }
+        const sheets = sheetManager!.getRecentSheets(user.email);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(sheets));
+        return;
+      }
+
+      // GET /api/sheets/:id
+      const sheetGetMatch = rawUrl.match(/^\/api\/sheets\/([a-zA-Z0-9_-]+)$/);
+      if (req.method === 'GET' && sheetGetMatch) {
+        const sheetId = sheetGetMatch[1]!;
+        const meta = sheetManager!.getSheetMeta(sheetId);
+        const user = getSessionFromRequest(req, sessionManager!);
+        if (!meta) {
+          if (!user) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'signin_required' }));
+          } else {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'forbidden' }));
+          }
+          return;
+        }
+        const role = roleFor(meta, user);
+        if (role === null) {
+          if (!user) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'signin_required' }));
+          } else {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'forbidden' }));
+          }
+          return;
+        }
+        const resObj: Record<string, unknown> = {
+          id: meta.id,
+          title: meta.title,
+          role,
+          visibility: meta.visibility,
+          publicRole: meta.publicRole,
+        };
+        if (role === 'owner') {
+          resObj['acl'] = meta.acl;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(resObj));
+        return;
+      }
+
+      // PATCH /api/sheets/:id
+      const sheetPatchMatch = rawUrl.match(/^\/api\/sheets\/([a-zA-Z0-9_-]+)$/);
+      if (req.method === 'PATCH' && sheetPatchMatch) {
+        const sheetId = sheetPatchMatch[1]!;
+        const user = getSessionFromRequest(req, sessionManager!);
+        if (!user) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'signin_required' }));
+          return;
+        }
+        const meta = sheetManager!.getSheetMeta(sheetId);
+        if (!meta) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'forbidden' }));
+          return;
+        }
+        const role = roleFor(meta, user);
+        if (role !== 'owner' && role !== 'editor') {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'forbidden' }));
+          return;
+        }
+        const bodyRes = await readJsonBody(req);
+        if (!bodyRes.ok) {
+          res.writeHead(bodyRes.status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: bodyRes.error }));
+          return;
+        }
+        const updateRes = sheetManager!.updateTitle(sheetId, bodyRes.body?.title);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(updateRes));
+        return;
+      }
+
+      // PUT /api/sheets/:id/share
+      const sheetShareMatch = rawUrl.match(/^\/api\/sheets\/([a-zA-Z0-9_-]+)\/share$/);
+      if (req.method === 'PUT' && sheetShareMatch) {
+        const sheetId = sheetShareMatch[1]!;
+        const user = getSessionFromRequest(req, sessionManager!);
+        if (!user) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'signin_required' }));
+          return;
+        }
+        const meta = sheetManager!.getSheetMeta(sheetId);
+        if (!meta) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'forbidden' }));
+          return;
+        }
+        const role = roleFor(meta, user);
+        if (role !== 'owner') {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'forbidden' }));
+          return;
+        }
+        const bodyRes = await readJsonBody(req);
+        if (!bodyRes.ok) {
+          res.writeHead(bodyRes.status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: bodyRes.error }));
+          return;
+        }
+        const { visibility, publicRole, acl } = bodyRes.body ?? {};
+        if (visibility !== 'restricted' && visibility !== 'public') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'bad_request' }));
+          return;
+        }
+        if (publicRole !== 'viewer' && publicRole !== 'editor') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'bad_request' }));
+          return;
+        }
+        const validatedAcl = validateAcl(acl);
+        if (validatedAcl === null) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'bad_request' }));
+          return;
+        }
+        const shareRes = sheetManager!.updateShare(
+          sheetId,
+          visibility,
+          publicRole,
+          validatedAcl
+        );
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(shareRes));
+        return;
+      }
+
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not_found' }));
+      return;
+    }
+
     // Static file serving when enabled
     if (distRoot && req.method === 'GET') {
-      const rawUrl = (req.url ?? '/').split('?')[0] ?? '/';
       const decoded = decodeURIComponent(rawUrl);
       const resolved = path.resolve(distRoot, '.' + decoded);
 
@@ -222,12 +565,17 @@ export function startServer(opts: ServerOptions = {}): ServerHandle {
       return;
     }
 
+    const sessionUser = authMode === 'on' ? getSessionFromRequest(req, sessionManager!) : null;
     let client: Client | null = null;
     let clientCid: string | undefined;
+    let currentRoom: Room | null = null;
+    let currentSheetId: string | undefined;
     let alive = true;
     const bucket = newBucket();
 
-    ws.on('pong', () => { alive = true; });
+    ws.on('pong', () => {
+      alive = true;
+    });
 
     ws.on('error', () => {
       clearInterval(pingTimer);
@@ -263,23 +611,74 @@ export function startServer(opts: ServerOptions = {}): ServerHandle {
       // First message must be JOIN or RESUME
       if (!client) {
         if (msg.t === 'JOIN' || msg.t === 'RESUME') {
-          const sanitized = sanitizeName(msg.name);
           clientCid = msg.cid;
-          client = room.addClient(ws, sanitized, msg.cid);
-          room.handleMessage(client, str);
+          if (authMode === 'off') {
+            const sanitized = sanitizeName(msg.name);
+            client = room.addClient(ws, sanitized, msg.cid);
+            currentRoom = room;
+            room.handleMessage(client, str);
+          } else {
+            const sheetId = msg.sheetId || 'main';
+            const targetRoom = sheetManager!.getOrCreateRoom(sheetId);
+            if (!targetRoom) {
+              ws.send(JSON.stringify({ t: 'ERROR', code: 'forbidden', msg: 'sheet not found' }));
+              ws.close(4403, 'forbidden');
+              return;
+            }
+            const meta = targetRoom.getMeta();
+            const role = meta ? roleFor(meta, sessionUser) : null;
+            if (role === null) {
+              if (sessionUser === null) {
+                ws.send(
+                  JSON.stringify({
+                    t: 'ERROR',
+                    code: 'signin_required',
+                    msg: 'sign in required',
+                  })
+                );
+                ws.close(4403, 'signin_required');
+              } else {
+                ws.send(
+                  JSON.stringify({
+                    t: 'ERROR',
+                    code: 'forbidden',
+                    msg: 'forbidden',
+                  })
+                );
+                ws.close(4403, 'forbidden');
+              }
+              return;
+            }
+
+            let name: string;
+            if (sessionUser) {
+              name = sanitizeName(sessionUser.name);
+            } else {
+              guestCounter++;
+              name = `Guest ${guestCounter}`;
+            }
+
+            client = targetRoom.addClient(ws, name, msg.cid, role, sessionUser);
+            currentRoom = targetRoom;
+            currentSheetId = sheetId;
+            targetRoom.handleMessage(client, str);
+          }
         } else {
           ws.send(JSON.stringify({ t: 'ERROR', code: 'bad_request', msg: 'must JOIN first' }));
         }
         return;
       }
 
-      room.handleMessage(client, str);
+      currentRoom!.handleMessage(client, str);
     });
 
     ws.on('close', () => {
       clearInterval(pingTimer);
-      if (client) {
-        room.removeClient(client.u, clientCid, ws);
+      if (client && currentRoom) {
+        currentRoom.removeClient(client.u, clientCid, ws);
+      }
+      if (currentSheetId && authMode === 'on') {
+        sheetManager!.onClientLeaveRoom(currentSheetId);
       }
     });
   });
@@ -288,15 +687,11 @@ export function startServer(opts: ServerOptions = {}): ServerHandle {
   const addr = httpServer.address();
   const actualPort = typeof addr === 'object' && addr ? addr.port : requestedPort;
 
-  // Persistence timer
+  // Persistence timer for legacy mode
   let dirty = false;
   let persistTimer: ReturnType<typeof setInterval> | null = null;
 
-  if (persist) {
-    // Watch for version changes to mark dirty
-    const origHandleEdit = room.handleEdit.bind(room);
-    const wrappedHandleMessage = room.handleMessage.bind(room);
-    // Use a proxy approach: mark dirty after each EDIT
+  if (authMode === 'off' && persist) {
     let lastVersion = room.getVersion();
 
     persistTimer = setInterval(() => {
@@ -311,19 +706,26 @@ export function startServer(opts: ServerOptions = {}): ServerHandle {
       }
     }, PERSIST_INTERVAL);
 
-    // Save on exit signals
     const onExit = () => {
       if (room.getVersion() !== lastVersion || dirty) {
         saveState(dataDir, room.getVersion(), room.getRaw());
       }
     };
-    process.on('SIGINT', () => { onExit(); process.exit(0); });
-    process.on('SIGTERM', () => { onExit(); process.exit(0); });
+    process.on('SIGINT', () => {
+      onExit();
+      process.exit(0);
+    });
+    process.on('SIGTERM', () => {
+      onExit();
+      process.exit(0);
+    });
   }
 
   const close = (): Promise<void> =>
     new Promise((resolve) => {
       if (persistTimer) clearInterval(persistTimer);
+      if (sheetManager) sheetManager.destroy();
+      if (sessionManager) sessionManager.destroy();
       for (const ws of wss.clients) {
         ws.terminate();
       }
@@ -332,21 +734,22 @@ export function startServer(opts: ServerOptions = {}): ServerHandle {
       });
     });
 
-  return { close, port: actualPort, room };
+  return { close, port: actualPort, room, sheetManager, sessionManager };
 }
 
 // ── Default startup ──
 
-const isMain = typeof process !== 'undefined' && process.argv[1] && (
-  process.argv[1].endsWith('server\\index.ts') ||
-  process.argv[1].endsWith('server/index.ts') ||
-  process.argv[1].endsWith('server\\index.js') ||
-  process.argv[1].endsWith('server/index.js')
-);
+const isMain =
+  typeof process !== 'undefined' &&
+  process.argv[1] &&
+  (process.argv[1].endsWith('server\\index.ts') ||
+    process.argv[1].endsWith('server/index.ts') ||
+    process.argv[1].endsWith('server\\index.js') ||
+    process.argv[1].endsWith('server/index.js'));
 
 if (isMain && process.env['NODE_ENV'] !== 'test' && !process.env['SPREADSHEET_LIB']) {
   const PORT = parseInt(process.env['PORT'] || '8787', 10);
   const useStatic = process.argv.includes('-static');
-  const handle = startServer({ port: PORT, persist: true, serveStatic: useStatic });
+  const handle = startServer({ port: PORT, persist: true, serveStatic: useStatic, auth: 'on' });
   console.log(`Server listening on http://localhost:${handle.port}`);
 }

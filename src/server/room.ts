@@ -1,6 +1,8 @@
 import type { WebSocket } from 'ws';
 import type { CellId, Edit } from '../engine/types';
 import type { C2S, S2C, Op, User, Role } from '../shared/protocol';
+import type { SessionUser } from './auth';
+import type { SheetMeta } from './sheets';
 import { COLS, ROWS } from '../engine/constants';
 import { randomUUID } from 'node:crypto';
 
@@ -22,6 +24,7 @@ export interface Client {
   cell: CellId | null;
   lastOpId: number;
   role?: Role;
+  user?: SessionUser | null;
 }
 
 interface Session {
@@ -53,9 +56,31 @@ export class Room {
   private readonly sessions: Map<string, Session> = new Map(); // cid -> session
   private presenceTimer: ReturnType<typeof setTimeout> | null = null;
   private presenceDirty = false;
+  private meta?: SheetMeta;
+  private dirty = false;
 
   constructor(sheetId: string) {
     this.sheetId = sheetId;
+  }
+
+  getMeta(): SheetMeta | undefined {
+    return this.meta;
+  }
+
+  setMeta(meta: SheetMeta): void {
+    this.meta = meta;
+  }
+
+  getClients(): Map<string, Client> {
+    return this.clients;
+  }
+
+  isDirty(): boolean {
+    return this.dirty;
+  }
+
+  markClean(): void {
+    this.dirty = false;
   }
 
   /** Load persisted state (version + raw cells) */
@@ -69,7 +94,13 @@ export class Room {
 
   // ── Client management ──
 
-  addClient(ws: WebSocket, name: string, cid: string | undefined): Client {
+  addClient(
+    ws: WebSocket,
+    name: string,
+    cid: string | undefined,
+    role?: Role,
+    user?: SessionUser | null
+  ): Client {
     const sanitized = sanitizeName(name);
 
     // Check for existing session by cid
@@ -88,6 +119,8 @@ export class Room {
           color: session.color,
           cell: null,
           lastOpId: session.lastOpId,
+          role: role ?? 'editor',
+          user: user ?? null,
         };
         this.clients.set(client.u, client);
         // Update session name in case it changed
@@ -100,7 +133,16 @@ export class Room {
     const u = randomUUID();
     const color = PALETTE[colorIdx % PALETTE.length]!;
     colorIdx++;
-    const client: Client = { ws, u, name: sanitized, color, cell: null, lastOpId: 0 };
+    const client: Client = {
+      ws,
+      u,
+      name: sanitized,
+      color,
+      cell: null,
+      lastOpId: 0,
+      role: role ?? 'editor',
+      user: user ?? null,
+    };
     this.clients.set(u, client);
 
     // Store session
@@ -237,6 +279,13 @@ export class Room {
   // ── EDIT ──
 
   handleEdit(client: Client, opId: number, edits: Edit[]): void {
+    // Role check: viewers cannot edit
+    if (client.role === 'viewer') {
+      this.sendTo(client, { t: 'ERROR', code: 'read_only', msg: 'read-only' });
+      this.sendSnapshot(client);
+      return;
+    }
+
     // opId dedupe
     if (opId <= client.lastOpId) {
       return;
@@ -251,6 +300,10 @@ export class Room {
 
     client.lastOpId = opId;
     this.version++;
+    this.dirty = true;
+    if (this.meta) {
+      this.meta.updatedAt = Date.now();
+    }
 
     // Update session lastOpId
     for (const [, session] of this.sessions) {
@@ -312,6 +365,24 @@ export class Room {
   private sendTo(client: Client, msg: S2C): void {
     if (client.ws.readyState === 1) { // WebSocket.OPEN
       client.ws.send(JSON.stringify(msg));
+    }
+  }
+
+  // ── Share change propagation ──
+
+  updateRoles(roleCalculator: (user: SessionUser | null) => Role | null): void {
+    for (const client of Array.from(this.clients.values())) {
+      const newRole = roleCalculator(client.user ?? null);
+      if (newRole === null) {
+        this.sendTo(client, { t: 'ERROR', code: 'forbidden', msg: 'access removed' });
+        this.removeClient(client.u, undefined, client.ws);
+        try {
+          client.ws.close(4403, 'forbidden');
+        } catch {}
+      } else if (newRole !== client.role) {
+        client.role = newRole;
+        this.sendTo(client, { t: 'ROLE', role: newRole });
+      }
     }
   }
 
