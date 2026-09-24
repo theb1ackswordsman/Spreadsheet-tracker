@@ -111,6 +111,23 @@ export function setRawMirror(id: CellId, raw: string): void {
   }
 }
 
+/** Replace entire raw mirror (for SNAPSHOT). Clears old entries, notifies subscribers. */
+export function replaceRawMirror(cells: [CellId, string][]): void {
+  // Collect old keys to clear
+  const oldKeys = new Set(rawMirror.keys());
+  const newKeys = new Set<CellId>();
+  for (const [id, raw] of cells) {
+    newKeys.add(id);
+    setRawMirror(id, raw);
+  }
+  // Clear entries that are no longer present
+  for (const id of oldKeys) {
+    if (!newKeys.has(id)) {
+      setRawMirror(id, '');
+    }
+  }
+}
+
 export function getRaw(id: CellId): string {
   return rawMirror.get(id) ?? '';
 }
